@@ -1,64 +1,87 @@
-THE ANNOTATED-BOOK TOOLKIT
-=========================
+THE ANNOTATED-BOOK TOOLKIT (v.3)
+=================================
 
-Turns a paged HTML book - or a text PDF - into the annotated edition:
-dark mode, four-colour highlighting, hideable click-to-open notes, and a panel
-with Export / Import / Report / Print / Save into HTML / Save over my book.
+Build a self-contained, paged HTML book with dark mode, four-colour highlighting,
+hideable notes, an annotations panel, and an optional offline dictionary.
 
-THE EASY WAY (one command)
---------------------------
+INSTALL
+-------
+    python3 -m pip install -r requirements.txt
+
+For browser behavior tests, also install Chromium and its system dependencies:
+    python3 -m playwright install chromium
+    python3 -m playwright install-deps chromium
+
+ONE-COMMAND BUILD — FROM PDF OR HTML
+------------------------------------
+A text PDF (the built-in reader shell already contains the annotation tools):
     python3 build_enhanced.py \
-        --input book.html --output "My Book (annotated).html" \
+        --input "book.pdf" --output "My Book.html" \
         --title "My Book" --author "A. Author" \
-        --prefix mybook-slug --slug my-book --picker mybook-file
+        --prefix my-book-a-author --slug my-book --picker my-book-file \
+        [--facsimile webp] [--no-dictionary] [--skip-tests]
 
-It re-keys every storage name (so two books can never share annotations), runs the
-four patchers in order, checks the result (script syntax, leftovers, self-contained)
-and runs the behaviour tests.  Exit 0 means everything passed.
+A pristine, paged HTML source (the toolkit adds the annotation tools):
+    python3 build_enhanced.py \
+        --input "book.html" --output "My Book.html" \
+        --title "My Book" --author "A. Author" \
+        --prefix my-book-a-author --slug my-book --picker my-book-file \
+        [--no-dictionary] [--skip-tests]
+
+The PDF route does not run the patchers a second time. It rebuilds the title's
+storage keys and dictionary, cleans inherited analytics scripts, repairs common
+PDF drop-cap ordering, and automatically handles reversed Arabic-Indic digit runs
+in Latin-text PDFs. The HTML route still applies patchers in order. Both routes
+check the output and keep an existing output file untouched unless the build passes.
+
+PDF OPTIONS
+-----------
+  --facsimile webp       Embed page images and keep an Original pages view.
+                         Existing default remains: none.
+  --digit-order auto     Detect reversed Arabic-Indic runs in Latin-text PDFs.
+  --digit-order normal   Leave digit order as extracted.
+  --digit-order reverse-arabic  Force-reverse Arabic-Indic digit sequences.
+  --no-dictionary        Omit dictionary scripts, styles, and data.
+  --skip-tests           Skip Playwright behavior tests; structural and JavaScript
+                         checks still run.
+
+The direct PDF converter is also available:
+    python3 pdf_to_book.py --pdf "book.pdf" --out "My Book.html" \
+        --title "My Book" --author "A. Author"
+
+It builds a complete annotated HTML file by itself; do not run build_enhanced.py on
+that output again.
 
 THE OFFLINE DICTIONARY
 ----------------------
-Any book built this way can carry a dictionary inside it: select a word in the text,
-click Define in the popup, and get a definition - no internet, and it works inside a
-baked copy too.
+By default, the PDF builder creates definitions only for words found in the book.
+Sources (best first): glossary.py (hand-written theological definitions), WordNet,
+and Webster's 1913. First-time dictionary generation may download WordNet and
+Webster data. Use --no-dictionary for an offline build or to omit the feature.
 
-    python3 make_dict_data.py --book book.html --out dict_data.json
+TESTS
+-----
+Run the browser-free PDF regression tests:
+    python3 -m unittest discover -s tests -v
 
-Only the words that actually appear in the book are included, so the data stays
-small (Watson: 4,596 unique words -> 4,354 entries -> 548 KB).  Sources, in order:
-  1. glossary.py     hand-written definitions for Puritan/theological vocabulary
-                     (WordNet gives "repentance: remorse for your past conduct" -
-                      wrong register for this material, and worse for mortification,
-                      vivification, effectual calling, means of grace, and so on)
-  2. WordNet         clean modern glosses
-  3. Webster's 1913  public domain, and the right vintage for archaic words
-Add to glossary.py and re-run to improve the hand-written layer.
-
-FROM A PDF
-----------
-    python3 pdf_to_book.py --pdf "book.pdf" --out book.html \
-        --title "My Book" --author "A. Author" [--facsimile webp --dpi 90 --quality 48]
-
-Text layer becomes the reading view; --facsimile also embeds a WebP picture of every
-page so the book keeps an "Original pages" view (bigger file: ~30 MB for 274 pages).
-Superscripts, italics and paragraph joins are taken from the PDF's own spans.
+The full behavior tests are run by build_enhanced.py unless --skip-tests is passed.
+They exercise highlighting, notes, the panel, export/import, baking, file saving,
+and navigation in both reading and original-page views.
 
 FILES
 -----
-  build_enhanced.py     the pipeline (start here)
-  pdf_to_book.py        PDF -> paged HTML in the right shape
-  run_tests.py          behaviour tests for one book
-  test_isolation.py     proves two books cannot share annotations
-  make_dict_data.py     builds the dictionary data for one book
-  glossary.py           the hand-written definitions (edit these freely)
-  add_dark_mode.py      the five patchers, in order:
-  add_highlights.py       dark mode -> highlighting -> notes -> panel -> dictionary
-  add_notes.py
-  add_panel.py
-  add_dictionary.py       (dictionary: needs dict_data.json)
-  bake_annotations.py   the same "bake" from the command line
-  HOW-TO-REQUEST-ANOTHER-BOOK.md   what to tell the assistant
-  NOTES-FOR-A-FUTURE-ASSISTANT.md  every trap found while building this
+  build_enhanced.py     one command for PDF or pristine HTML input
+  pdf_to_book.py        PDF -> paged, annotated HTML
+  make_dict_data.py    builds book-specific offline dictionary entries
+  glossary.py           hand-written definitions and preferred senses
+  add_dark_mode.py      theme-toggle patcher for pristine HTML
+  add_highlights.py     highlighter patcher
+  add_notes.py          per-quote note patcher
+  add_panel.py          annotations panel patcher
+  add_dictionary.py     offline dictionary patcher for pristine HTML
+  run_tests.py          browser behavior tests
+  test_isolation.py     checks that separate books cannot share annotations
+  tests/                browser-free regression tests for PDF fixes
 
-DO NOT run the four patchers by hand on an already-built file: they are not
-idempotent.  Always start from the pristine original (build_enhanced.py does).
+The patchers are not idempotent. Do not run them manually on a book that has
+already been enhanced; start from the pristine HTML input or use the PDF route.

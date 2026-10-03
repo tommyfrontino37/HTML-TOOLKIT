@@ -1,285 +1,601 @@
 #!/usr/bin/env python3
-"""Convert a PDF book into the same paged-HTML shape as the Watson edition,
-so the four annotation patchers can build on it.
+"""Convert a text PDF into a self-contained, paged HTML book.
 
-    python3 pdf_to_book.py --pdf FILE --out FILE --title T --author A \
-        [--facsimile none|webp] [--dpi 90] [--quality 50]
+Basic use:
+    python3 pdf_to_book.py --pdf book.pdf --out book.html \
+        --title "My Book" --author "A. Author"
 
-The shell (CSS, fonts, toolbar, tail script) is taken from the Watson master so
-the result is structurally identical; only the content sections, the title, the
-chapter jump list, the table of contents and the page count change.
+The HTML shell supplies the reader UI (dark mode, highlights, notes, the
+annotations panel, and an offline dictionary). This converter replaces the
+sample book's content, re-keys its browser storage for this title, strips
+Cloudflare/remote scripts, and builds a dictionary from the new book rather
+than carrying over the sample book's dictionary.
 
-Reading view:  <section id="page-N" class="source-page" data-page="N">
-                 <div class="reading-content"><p><span class="text-line">…</span>…</p></div>
-Original view: <div class="original-content"><div class="original-sheet"><img src="data:image/webp;base64,…"></div></div>
-Both are exactly what the patchers and the book's own CSS expect.
+PDF-specific repairs:
+  * large drop-cap initials are moved back to the first paragraph, after the
+    page heading, when PDF block order puts them out of sequence;
+  * Arabic-Indic digit runs can be reversed when extraction order disagrees
+    with the left-to-right visual order (automatic for Latin-text PDFs).
+
+The converter is for PDFs with a text layer. Scanned-only PDFs need OCR first.
 """
 
 import argparse
 import base64
 import html
 import io
-import re
-import statistics
+import json
 import os
+import re
+import shutil
+import subprocess
+import sys
+import tempfile
+import unicodedata
 from collections import Counter
 
 import pymupdf
 
-SHELL = os.path.join(os.path.dirname(os.path.abspath(__file__)), "shell.html")
+TOOLKIT_DIR = os.path.dirname(os.path.abspath(__file__))
+SHELL = os.path.join(TOOLKIT_DIR, "shell.html")
+DICT_BUILDER = os.path.join(TOOLKIT_DIR, "make_dict_data.py")
+SCRIPT_RE = re.compile(r"(<script\b[^>]*>)(.*?)(</script\s*>)", re.I | re.S)
+DICT_DATA_RE = re.compile(
+    r'(<script type="application/json" id="dict-data">).*?(</script>)',
+    re.I | re.S,
+)
 
 
-def clean_text(t):
-    t = t.replace("\u00ad", "")          # soft hyphen: never a real break
-    t = t.replace("\ufb01", "fi").replace("\ufb02", "fl")
-    return t
+def clean_text(text, reverse_arabic_digits=False):
+    """Normalize common PDF ligatures and optional reversed digit sequences."""
+    text = text.replace("\u00ad", "")  # soft hyphen is a layout artifact
+    text = text.replace("\ufb01", "fi").replace("\ufb02", "fl")
+    if reverse_arabic_digits:
+        text = re.sub(
+            r"[\u0660-\u0669]+", lambda match: match.group(0)[::-1], text
+        )
+    return text
 
 
-def line_runs(line):
-    """One PDF line -> (plain text, size, [(text, is_superscript, is_italic)]).
+def detect_reversed_arabic_digits(doc):
+    """Return True for an English/Latin-text PDF using Arabic-Indic digits.
 
-    Superscript and italic come from the PDF's own span flags:
-    bit 0 = superscript, bit 1 = italic."""
+    The target PDF family is English books whose digit glyphs are stored in
+    reverse logical order. Avoid applying this heuristic to a document that
+    contains Arabic-script letters; callers can override it with --digit-order.
+    """
+    sample = "\n".join(doc[i].get_text("text") for i in range(min(doc.page_count, 40)))
+    digit_runs = re.findall(r"[\u0660-\u0669]{2,}", sample)
+    latin_letters = sum(char.isascii() and char.isalpha() for char in sample)
+    arabic_letters = sum(
+        "\u0600" <= char <= "\u06ff"
+        and not "\u0660" <= char <= "\u0669"
+        for char in sample
+    )
+    return bool(digit_runs) and latin_letters >= 200 and arabic_letters == 0
+
+
+def line_runs(line, reverse_arabic_digits=False):
+    """One PDF line -> (plain text, size, [(text, superscript, italic)])."""
     runs, plain, size = [], [], 0.0
-    for s in line["spans"]:
-        t = clean_text(s["text"])
-        if not t:
+    for span in line.get("spans", []):
+        text = clean_text(span.get("text", ""), reverse_arabic_digits)
+        if not text:
             continue
-        flags = int(s.get("flags", 0))
-        fname = s["font"].lower()
-        sup = bool(flags & 1)
-        ital = bool(flags & 2) or "italic" in fname or "oblique" in fname
-        runs.append((t, sup, ital))
-        plain.append(t)
-        size = max(size, s["size"])
+        flags = int(span.get("flags", 0))
+        font = str(span.get("font", "")).lower()
+        superscript = bool(flags & 1)
+        italic = bool(flags & 2) or "italic" in font or "oblique" in font
+        runs.append((text, superscript, italic))
+        plain.append(text)
+        size = max(size, float(span.get("size", 0.0)))
     if runs:
-        # trim the trailing whitespace of the last run only
-        t, sup, ital = runs[-1]
-        runs[-1] = (t.rstrip(), sup, ital)
+        text, superscript, italic = runs[-1]
+        runs[-1] = (text.rstrip(), superscript, italic)
     return "".join(plain).rstrip(), size, runs
 
 
-def page_lines(page, body_size):
-    """Return a list of ('p'|'h2'|'h3', [line strings]) for one PDF page."""
-    dct = page.get_text("dict")
+def page_lines(page, body_size, reverse_arabic_digits=False):
+    """Return ordered paragraph/heading groups for one PDF page."""
     out = []
-    for block in dct["blocks"]:
+    for block in page.get_text("dict").get("blocks", []):
         if block.get("type") != 0:
             continue
         block_items = []
         for line in block.get("lines", []):
-            txt, size, runs = line_runs(line)
-            if not txt.strip():
-                continue
-            block_items.append((txt, size, runs))
+            text, size, runs = line_runs(line, reverse_arabic_digits)
+            if text.strip():
+                block_items.append((text, size, runs))
         if not block_items:
             continue
-        # one block = one paragraph, unless the size changes inside it
-        para = []
-        kind = None
-        for txt, size, runs in block_items:
+
+        paragraph, kind = [], None
+        for text, size, runs in block_items:
             if size > body_size * 1.45:
-                k = "h2"
+                next_kind = "h2"
             elif size > body_size * 1.12:
-                k = "h3"
+                next_kind = "h3"
             else:
-                k = "p"
-            if kind is None:
-                kind = k
-            if k != kind and para:
-                out.append((kind, para))
-                para = []
-                kind = k
-            para.append((txt, runs))
-        if para:
-            out.append((kind, para))
+                next_kind = "p"
+            if kind is not None and next_kind != kind and paragraph:
+                out.append((kind, paragraph))
+                paragraph = []
+            kind = next_kind
+            paragraph.append((text, runs))
+        if paragraph:
+            out.append((kind, paragraph))
     return out
 
 
 def join_paragraph(lines):
-    """PDF line breaks are layout, not meaning: join them back into a paragraph.
-
-    Returns (plain text, html).  A line ending in "-" joins without a space;
-    superscripts become <sup> and italics <em>."""
-    plain = ""
-    out = []
-    for txt, runs in lines:
-        if not txt.strip():
+    """Join PDF visual lines, retaining italic and superscript markup."""
+    plain_parts, html_parts = [], []
+    previous = ""
+    for text, runs in lines:
+        if not text.strip():
             continue
-        glued = bool(plain) and plain.rstrip().endswith("-")
-        if plain and not glued:
-            out.append((" ", False, False))
-            plain += " "
-        for t, sup, ital in runs:
-            if not t:
+        if previous and not previous.rstrip().endswith("-"):
+            plain_parts.append(" ")
+            html_parts.append(" ")
+        for run_text, superscript, italic in runs:
+            if not run_text:
                 continue
-            out.append((t, sup, ital))
-            plain += t
-    # squeeze runs of spaces in the plain text for checks, and in the html output
-    pieces = []
-    for t, sup, ital in out:
-        h = html.escape(t)
-        if sup:
-            h = "<sup>" + h + "</sup>"
-        if ital:
-            h = "<em>" + h + "</em>"
-        pieces.append(h)
-    html_out = re.sub(r"\s+", " ", "".join(pieces)).strip()
-    return re.sub(r"\s+", " ", plain).strip(), html_out
+            plain_parts.append(run_text)
+            rendered = html.escape(run_text)
+            if superscript:
+                rendered = "<sup>" + rendered + "</sup>"
+            if italic:
+                rendered = "<em>" + rendered + "</em>"
+            html_parts.append(rendered)
+        previous = text
+    plain = re.sub(r"\s+", " ", "".join(plain_parts)).strip()
+    rendered = re.sub(r"\s+", " ", "".join(html_parts)).strip()
+    return plain, rendered
 
 
-def looks_like_furniture(text, page_no, total):
-    t = text.strip()
-    if re.fullmatch(r"\d{1,4}", t):
-        return True
-    if re.fullmatch(r"(?i)(page\s*)?\d{1,4}\s*(of\s*\d{1,4})?", t):
-        return True
-    return False
+def looks_like_furniture(text):
+    """Detect isolated page-number furniture, without dropping body numbers."""
+    text = text.strip()
+    return bool(
+        re.fullmatch(r"\d{1,4}", text)
+        or re.fullmatch(r"(?i)(page\s*)?\d{1,4}\s*(of\s*\d{1,4})?", text)
+    )
 
 
-def build_reading_content(page, body_size, page_no, total):
-    kinds = page_lines(page, body_size)
-    out = []
-    n = 0
-    for kind, raw_lines in kinds:
-        lines = [item for item in raw_lines if item[0].strip()]
-        if not lines:
+def repair_drop_caps(elements):
+    """Join a one-letter drop cap to its paragraph after any page heading.
+
+    A common PDF layout stores a large initial in its own block. The PDF reader
+    may report it before the chapter heading even though readers encounter the
+    heading first. Remove only the unmistakable pattern: one capital H2, zero or
+    more following headings, then a paragraph beginning with a lowercase letter.
+    """
+    index = 0
+    while index < len(elements):
+        match = re.fullmatch(
+            r'<h2><span id="line-\d+-\d+" class="text-line">([A-Z])</span></h2>',
+            elements[index],
+        )
+        if not match:
+            index += 1
             continue
-        if len(lines) == 1 and looks_like_furniture(lines[0][0], page_no, total):
+        paragraph_index = index + 1
+        while paragraph_index < len(elements) and re.match(r"<h[23]>", elements[paragraph_index]):
+            paragraph_index += 1
+        if paragraph_index >= len(elements) or not elements[paragraph_index].startswith("<p>"):
+            index += 1
+            continue
+        first_text = html.unescape(re.sub(r"<[^>]*>", "", elements[paragraph_index])).lstrip()
+        if not first_text or not first_text[0].islower():
+            index += 1
+            continue
+        letter = match.group(1)
+        updated, count = re.subn(
+            r"(<p><span\b[^>]*>)",
+            lambda opening: opening.group(1) + letter,
+            elements[paragraph_index],
+            count=1,
+        )
+        if count != 1:
+            index += 1
+            continue
+        elements[paragraph_index] = updated
+        elements.pop(index)
+        # Continue at this index: another leading initial may be adjacent.
+    return elements
+
+
+def build_reading_content(page, body_size, page_no, total, reverse_arabic_digits=False):
+    elements = []
+    line_no = 0
+    for kind, raw_lines in page_lines(page, body_size, reverse_arabic_digits):
+        lines = [item for item in raw_lines if item[0].strip()]
+        if not lines or (len(lines) == 1 and looks_like_furniture(lines[0][0])):
             continue
         plain, _ = join_paragraph(lines)
         if not plain:
             continue
         spans = []
-        for txt, runs in lines:
-            n += 1
+        for _, runs in lines:
+            line_no += 1
             inner = ""
-            for t, sup, ital in runs:
-                h = html.escape(t)
-                if sup:
-                    h = "<sup>" + h + "</sup>"
-                if ital:
-                    h = "<em>" + h + "</em>"
-                inner += h
-            spans.append('<span id="line-%d-%d" class="text-line">%s</span>'
-                         % (page_no, n, inner.strip()))
+            for text, superscript, italic in runs:
+                rendered = html.escape(text)
+                if superscript:
+                    rendered = "<sup>" + rendered + "</sup>"
+                if italic:
+                    rendered = "<em>" + rendered + "</em>"
+                inner += rendered
+            spans.append(
+                '<span id="line-%d-%d" class="text-line">%s</span>'
+                % (page_no, line_no, inner.strip())
+            )
         tag = "p" if kind == "p" else kind
-        out.append("<%s>%s</%s>" % (tag, " ".join(spans), tag))
-    return "\n".join(out)
+        elements.append("<%s>%s</%s>" % (tag, " ".join(spans), tag))
+    return "\n".join(repair_drop_caps(elements))
 
 
-def render_page_image(doc, pno, dpi, quality):
-    import io as _io
+def render_page_image(doc, page_index, dpi, quality):
     from PIL import Image
-    pix = doc[pno].get_pixmap(dpi=dpi, colorspace=pymupdf.csGRAY)
-    img = Image.frombytes("L", (pix.width, pix.height), pix.samples)
-    buf = _io.BytesIO()
-    img.save(buf, "WEBP", quality=quality, method=6)
-    return base64.b64encode(buf.getvalue()).decode("ascii"), pix.width, pix.height
+
+    pixmap = doc[page_index].get_pixmap(dpi=dpi, colorspace=pymupdf.csGRAY)
+    image = Image.frombytes("L", (pixmap.width, pixmap.height), pixmap.samples)
+    buffer = io.BytesIO()
+    image.save(buffer, "WEBP", quality=quality, method=6)
+    return base64.b64encode(buffer.getvalue()).decode("ascii"), pixmap.width, pixmap.height
 
 
-def main():
-    ap = argparse.ArgumentParser()
-    ap.add_argument("--pdf", required=True)
-    ap.add_argument("--out", required=True)
-    ap.add_argument("--title", required=True)
-    ap.add_argument("--author", required=True)
-    ap.add_argument("--facsimile", choices=["none", "webp"], default="none")
-    ap.add_argument("--dpi", type=int, default=90)
-    ap.add_argument("--quality", type=int, default=50)
-    args = ap.parse_args()
+def slugify(value, fallback="book"):
+    ascii_text = unicodedata.normalize("NFKD", value).encode("ascii", "ignore").decode("ascii")
+    slug = re.sub(r"[^a-z0-9]+", "-", ascii_text.lower()).strip("-")
+    return slug or fallback
 
-    doc = pymupdf.open(args.pdf)
-    total = doc.page_count
-    shell = io.open(SHELL, encoding="utf-8").read()
 
-    # ---- work out the body font size from a sample
-    sizes = Counter()
-    for i in range(0, min(total, 40)):
-        for b in doc[i].get_text("dict")["blocks"]:
-            for l in b.get("lines", []):
-                for s in l["spans"]:
-                    if len(s["text"].strip()) > 20:
-                        sizes[round(s["size"], 1)] += len(s["text"].strip())
-    body_size = sizes.most_common(1)[0][0]
+def js_string_fragment(value):
+    """Escape text for safe insertion inside existing JS string literals."""
+    value = str(value)
+    value = value.replace("\\", "\\\\")
+    value = value.replace("'", "\\'").replace('"', '\\"').replace("`", "\\`")
+    value = value.replace("\r", "\\r").replace("\n", "\\n")
+    value = value.replace("\u2028", "\\u2028").replace("\u2029", "\\u2029")
+    # Prevent literal HTML script terminators inside an inline string.
+    value = value.replace("<", "\\x3c").replace(">", "\\x3e")
+    value = value.replace("${", "\\${")
+    return value
 
-    # ---- table of contents from the PDF
-    toc = []
-    for level, title, pno in doc.get_toc():
-        t = re.sub(r"\s+", " ", clean_text(title)).strip()
-        if t:
-            toc.append((t, max(1, min(total, pno))))
 
-    # ---- the shell: swap the book-specific parts
-    pre = shell[:shell.index('<main class="book">')]
-    post = shell[shell.index("</main>"):]
+def replace_book_identity(source, title, author):
+    """Replace sample title/author in HTML and inline scripts safely."""
+    pieces = []
+    cursor = 0
+    for match in SCRIPT_RE.finditer(source):
+        outside = source[cursor:match.start()]
+        outside = outside.replace("The Doctrine of Repentance", html.escape(title, quote=True))
+        outside = outside.replace("Thomas Watson", html.escape(author, quote=True))
+        pieces.append(outside)
+        opening, body, closing = match.groups()
+        if "application/json" not in opening.lower():
+            body = body.replace("The Doctrine of Repentance", js_string_fragment(title))
+            body = body.replace("Thomas Watson", js_string_fragment(author))
+        pieces.extend((opening, body, closing))
+        cursor = match.end()
+    outside = source[cursor:]
+    outside = outside.replace("The Doctrine of Repentance", html.escape(title, quote=True))
+    outside = outside.replace("Thomas Watson", html.escape(author, quote=True))
+    pieces.append(outside)
+    return "".join(pieces)
 
-    text = lambda t: html.escape(t, quote=False)      # title/h1/byline: keep apostrophes literal
-    attr = lambda t: html.escape(t, quote=True)        # attributes: escape quotes too
-    pre = pre.replace('<meta name="author" content="Thomas Watson">',
-                      '<meta name="author" content="%s">' % attr(args.author), 1)
-    blurb = (" With a reading view and an original-page view." if args.facsimile != "none"
-             else " With a reading view.")
-    desc = ("%s by %s. Complete HTML conversion of the supplied %d-page PDF.%s"
-            % (attr(args.title), attr(args.author), total, blurb))
-    pre = re.sub(r'<meta name="description" content="[^"]*">',
-                 lambda m: '<meta name="description" content="%s">' % desc, pre, count=1)
-    pre = re.sub(r"<title>[^<]*</title>", "<title>%s &#8212; %s</title>" % (text(args.title), text(args.author)), pre, count=1)
-    pre = pre.replace('<p class="eyebrow">HTML edition</p>',
-                      '<p class="eyebrow">HTML edition</p>', 1)
-    pre = re.sub(r'<h1>[^<]*</h1>', '<h1>%s</h1>' % text(args.title), pre, count=1)
-    pre = re.sub(r'<p class="byline">[^<]*</p>',
-                 '<p class="byline">%s &#183; %d original PDF pages</p>' % (text(args.author), total),
-                 pre, count=1)
-    pre = re.sub(r'(<input id="page-number"[^>]*max=")\d+(")', r"\g<1>%d\g<2>" % total, pre, count=1)
 
-    # chapter jump + table of contents
+def sanitize_template(source):
+    """Remove analytics/challenge code and remote script dependencies."""
+    removed = 0
+
+    def clean_script(match):
+        nonlocal removed
+        full_tag = match.group(0)
+        opening = match.group(1).lower()
+        markers = ("cloudflareinsights", "__cf$cv$params", "challenge-platform", "/cdn-cgi/")
+        if "src=" in opening or any(marker in full_tag.lower() for marker in markers):
+            removed += 1
+            return ""
+        return full_tag
+
+    source = SCRIPT_RE.sub(clean_script, source)
+    # The reader is offline-first; remove remote stylesheets/preconnect hints.
+    source = re.sub(r'<link[^>]*href="https?://[^"]+"[^>]*>', "", source, flags=re.I)
+    return source, removed
+
+
+def strip_dictionary_assets(source):
+    """Remove dictionary payload, styles, and Define hook for --no-dictionary."""
+    patterns = (
+        r'<script type="application/json" id="dict-data">.*?</script>',
+        r'<script id="dict-script">.*?</script>',
+        r'<style id="dict-style">.*?</style>',
+    )
+    for pattern in patterns:
+        source = re.sub(pattern, "", source, flags=re.I | re.S)
+    return source
+
+
+def set_dictionary_data(source, data):
+    """Replace the one JSON data block with book-specific dictionary entries."""
+    payload = data.replace("<", r"\u003c")
+    updated, count = DICT_DATA_RE.subn(
+        lambda match: match.group(1) + payload + match.group(2), source, count=1
+    )
+    if count != 1:
+        raise ValueError("reader shell must contain exactly one dict-data placeholder")
+    return updated
+
+
+def external_resource_references(source):
+    """List resource-bearing external refs (ordinary outbound links are fine)."""
+    refs = re.findall(r'<script[^>]*src=', source, flags=re.I)
+    refs += re.findall(r'<link[^>]*href="https?://', source, flags=re.I)
+    refs += re.findall(r'<img[^>]*src="https?://', source, flags=re.I)
+    refs += re.findall(r'url\s*\(\s*["\']?https?://', source, flags=re.I)
+    return refs
+
+
+def build_book_shell(shell, args, total, toc, body_size, reverse_digits):
+    marker = '<main class="book">'
+    if shell.count(marker) != 1 or shell.count("</main>") < 1:
+        raise ValueError("shell.html must have a single main.book container")
+    main_start = shell.index(marker)
+    main_end = shell.index("</main>", main_start) + len("</main>")
+    pre = shell[:main_start]
+    post = shell[main_end - len("</main>"):]
+
+    pre, removed_pre = sanitize_template(pre)
+    post, removed_post = sanitize_template(post)
+    rekeys = {
+        "watson-repentance": args.prefix,
+        "doctrine-of-repentance": args.slug,
+        "doctrine-book": args.picker,
+    }
+    for old, new in rekeys.items():
+        pre = pre.replace(old, new)
+        post = post.replace(old, new)
+    pre = replace_book_identity(pre, args.title, args.author)
+    post = replace_book_identity(post, args.title, args.author)
+
+    # Replace metadata and visible header fields in the template.
+    attr = lambda value: html.escape(value, quote=True)
+    text = lambda value: html.escape(value, quote=False)
+    pre = re.sub(
+        r'<meta\s+name="author"\s+content="[^"]*">',
+        '<meta name="author" content="%s">' % attr(args.author),
+        pre,
+        count=1,
+        flags=re.I,
+    )
+    blurb = " With a reading view and an original-page view." if args.facsimile == "webp" else " With a reading view."
+    description = "%s by %s. Complete HTML conversion of the supplied %d-page PDF.%s" % (
+        attr(args.title), attr(args.author), total, blurb
+    )
+    pre = re.sub(
+        r'<meta\s+name="description"\s+content="[^"]*">',
+        lambda _: '<meta name="description" content="%s">' % description,
+        pre,
+        count=1,
+        flags=re.I,
+    )
+    pre = re.sub(
+        r"<title>.*?</title>",
+        "<title>%s &#8212; %s</title>" % (text(args.title), text(args.author)),
+        pre,
+        count=1,
+        flags=re.I | re.S,
+    )
+    pre = re.sub(r"<h1>.*?</h1>", "<h1>%s</h1>" % text(args.title), pre, count=1, flags=re.I | re.S)
+    pre = re.sub(
+        r'<p\s+class="byline">.*?</p>',
+        '<p class="byline">%s &#183; %d original PDF pages</p>' % (text(args.author), total),
+        pre,
+        count=1,
+        flags=re.I | re.S,
+    )
+    pre = re.sub(r'(<input\s+id="page-number"[^>]*\bmax=")[0-9]+(")',
+                 lambda m: m.group(1) + str(total) + m.group(2), pre, count=1, flags=re.I)
+
     jump = ['<option value="">Jump to a chapter&#8230;</option>']
     nav = []
-    for t, pno in toc:
-        jump.append('<option value="%d">%s</option>' % (pno, html.escape(t)))
-        nav.append('<a href="#page-%d"><span>%s</span><small>%d</small></a>' % (pno, html.escape(t), pno))
-    pre = re.sub(r'(<select id="chapter-jump"[^>]*>)<option value="">.*?</option>.*?</select>',
-                 lambda m: m.group(1) + "".join(jump) + "</select>", pre, count=1, flags=re.S)
-    pre = re.sub(r'(<nav class="toc" aria-label="Table of contents">).*?(</nav>)',
-                 lambda m: m.group(1) + "".join(nav) + m.group(2), pre, count=1, flags=re.S)
+    for title, page_no in toc:
+        safe = html.escape(title, quote=True)
+        jump.append('<option value="%d">%s</option>' % (page_no, safe))
+        nav.append('<a href="#page-%d"><span>%s</span><small>%d</small></a>' % (page_no, safe, page_no))
+    pre = re.sub(
+        r'(<select\s+id="chapter-jump"[^>]*>).*?</select>',
+        lambda match: match.group(1) + "".join(jump) + "</select>",
+        pre,
+        count=1,
+        flags=re.I | re.S,
+    )
+    pre = re.sub(
+        r'(<nav\s+class="toc"\s+aria-label="Table of contents">).*?(</nav>)',
+        lambda match: match.group(1) + "".join(nav) + match.group(2),
+        pre,
+        count=1,
+        flags=re.I | re.S,
+    )
     if args.facsimile == "none":
-        # no page images: drop the "Original pages" option rather than offer a blank view
         pre = pre.replace('<option value="original">Original pages</option>', "", 1)
 
-    # ---- the sections
-    parts = []
-    img_bytes = 0
-    for i in range(total):
-        pno = i + 1
-        page = doc[i]
-        reading = build_reading_content(page, body_size, pno, total)
+    if args.no_dictionary:
+        pre = strip_dictionary_assets(pre)
+        post = strip_dictionary_assets(post)
+    else:
+        # Never ship the sample Watson vocabulary. The builder fills this safe
+        # placeholder after the new book's text sections have been generated.
+        placeholder, count = DICT_DATA_RE.subn(
+            lambda m: m.group(1) + "{}" + m.group(2), post, count=1
+        )
+        if count != 1:
+            raise ValueError("sample shell has no unique dict-data block to replace")
+        post = placeholder
+
+    sections = []
+    image_bytes = 0
+    doc = args._doc
+    for index in range(total):
+        page_no = index + 1
+        page = doc[index]
+        reading = build_reading_content(page, body_size, page_no, total, reverse_digits)
         has_text = bool(reading.strip())
         original = ""
         if args.facsimile == "webp" or not has_text:
-            b64, w, h = render_page_image(doc, i, args.dpi, args.quality)
-            img_bytes += len(b64)
-            original = ('<div class="original-content"><div class="original-sheet">'
-                        '<img src="data:image/webp;base64,%s" alt="Original PDF page %d" '
-                        'width="%d" height="%d"></div></div>' % (b64, pno, w, h))
+            encoded, width, height = render_page_image(doc, index, args.dpi, args.quality)
+            image_bytes += len(encoded)
+            original = (
+                '<div class="original-content"><div class="original-sheet">'
+                '<img src="data:image/webp;base64,%s" alt="Original PDF page %d" '
+                'width="%d" height="%d"></div></div>'
+                % (encoded, page_no, width, height)
+            )
         if not has_text and original:
-            # a page with no text layer is shown as a picture in the reading view too
-            reading = ('<figure><img src="%s" alt="Page %d"></figure>'
-                       % (re.search(r'src="([^"]+)"', original).group(1), pno))
-        parts.append('<section id="page-%d" class="source-page" data-page="%d" aria-label="Page %d">\n'
-                     '<div class="page-label"><span>Page %d of %d</span>'
-                     '<a href="#top" aria-label="Back to top">&#8593; Top</a></div>\n'
-                     '<div class="reading-content">%s</div>\n%s</section>'
-                     % (pno, pno, pno, pno, total, reading, original))
+            source = re.search(r'src="([^"]+)"', original).group(1)
+            reading = '<figure><img src="%s" alt="Page %d"></figure>' % (source, page_no)
+        sections.append(
+            '<section id="page-%d" class="source-page" data-page="%d" aria-label="Page %d">\n'
+            '<div class="page-label"><span>Page %d of %d</span>'
+            '<a href="#top" aria-label="Back to top">&#8593; Top</a></div>\n'
+            '<div class="reading-content">%s</div>\n%s</section>'
+            % (page_no, page_no, page_no, page_no, total, reading, original)
+        )
 
-    out = pre + '<main class="book">' + "\n".join(parts) + post
-    io.open(args.out, "w", encoding="utf-8").write(out)
+    book = pre + marker + "\n".join(sections) + post
+    return book, image_bytes, removed_pre + removed_post
 
-    print("wrote %s" % args.out)
-    print("  pages: %d | body font: %.1fpt | toc entries: %d" % (total, body_size, len(toc)))
-    print("  file: %.1f MB (page images: %.1f MB)" % (len(out) / 1e6, img_bytes / 1e6))
-    print("  sections: %d | os.1" % out.count('class="source-page"'))
+
+def main():
+    parser = argparse.ArgumentParser(description="Convert a text PDF into a paged, annotated HTML book.")
+    parser.add_argument("--pdf", required=True, help="input PDF with a text layer")
+    parser.add_argument("--out", required=True, help="output HTML path")
+    parser.add_argument("--title", required=True)
+    parser.add_argument("--author", required=True)
+    parser.add_argument("--prefix", help="unique annotation/storage prefix (default: derived from title + author)")
+    parser.add_argument("--slug", help="book filename slug (default: derived from title)")
+    parser.add_argument("--picker", help="unique file-picker ID (default: derived from slug)")
+    parser.add_argument("--facsimile", choices=["none", "webp"], default="none")
+    parser.add_argument("--dpi", type=int, default=90)
+    parser.add_argument("--quality", type=int, default=50)
+    parser.add_argument("--digit-order", choices=["auto", "normal", "reverse-arabic"], default="auto",
+                        help="auto-detect reversed Arabic-Indic digit runs in Latin-text PDFs")
+    parser.add_argument("--no-dictionary", action="store_true",
+                        help="omit dictionary UI/data; useful for offline builds without NLP data")
+    args = parser.parse_args()
+
+    try:
+        pdf_path = os.path.abspath(args.pdf)
+        out_path = os.path.abspath(args.out)
+        if pdf_path == out_path:
+            raise ValueError("input PDF and output HTML paths must be different")
+        os.makedirs(os.path.dirname(out_path) or ".", exist_ok=True)
+        if not os.path.isfile(pdf_path):
+            raise FileNotFoundError("PDF not found: " + pdf_path)
+        if args.dpi < 36 or args.dpi > 240:
+            raise ValueError("--dpi must be between 36 and 240")
+        if not 1 <= args.quality <= 100:
+            raise ValueError("--quality must be between 1 and 100")
+        if not os.path.isfile(SHELL):
+            raise FileNotFoundError("reader shell not found: " + SHELL)
+
+        args.slug = args.slug or slugify(args.title)
+        args.prefix = args.prefix or slugify(args.title + " " + args.author)
+        args.picker = args.picker or (args.slug + "-file")
+        for name in ("prefix", "slug", "picker"):
+            if not re.fullmatch(r"[a-z0-9]+(?:-[a-z0-9]+)*", getattr(args, name)):
+                raise ValueError("--%s must contain lowercase letters, numbers, and hyphens only" % name)
+
+        doc = pymupdf.open(pdf_path)
+        total = doc.page_count
+        if total < 1:
+            raise ValueError("PDF contains no pages")
+        if args.digit_order == "reverse-arabic":
+            reverse_digits = True
+        elif args.digit_order == "normal":
+            reverse_digits = False
+        else:
+            reverse_digits = detect_reversed_arabic_digits(doc)
+
+        sizes = Counter()
+        for index in range(min(total, 40)):
+            for block in doc[index].get_text("dict").get("blocks", []):
+                for line in block.get("lines", []):
+                    for span in line.get("spans", []):
+                        text = span.get("text", "").strip()
+                        if len(text) > 20:
+                            sizes[round(float(span.get("size", 0)), 1)] += len(text)
+        if not sizes:
+            raise ValueError("PDF has no extractable text layer. OCR the PDF first, then convert it.")
+        body_size = sizes.most_common(1)[0][0]
+
+        toc = []
+        for _, title, page_no in doc.get_toc():
+            title = re.sub(r"\s+", " ", clean_text(title, reverse_digits)).strip()
+            if title:
+                toc.append((title, max(1, min(total, page_no))))
+
+        with io.open(SHELL, encoding="utf-8") as file:
+            shell = file.read()
+        shell, removed_scripts = sanitize_template(shell)
+        args._doc = doc
+        output_html, image_bytes, _ = build_book_shell(shell, args, total, toc, body_size, reverse_digits)
+        if not args.no_dictionary:
+            # The dictionary builder reads only .reading-content inside <main>,
+            # so it sees the current book and not tool UI/script vocabulary.
+            with tempfile.TemporaryDirectory(prefix=".pdf-to-book-", dir=os.path.dirname(out_path) or ".") as tmp:
+                base_path = os.path.join(tmp, "book-base.html")
+                dict_path = os.path.join(tmp, "dict_data.json")
+                with io.open(base_path, "w", encoding="utf-8") as file:
+                    file.write(output_html)
+                result = subprocess.run(
+                    [sys.executable, DICT_BUILDER, "--book", base_path, "--out", dict_path],
+                    cwd=TOOLKIT_DIR,
+                    capture_output=True,
+                    text=True,
+                )
+                if result.stdout.strip():
+                    print(result.stdout.strip())
+                if result.stderr.strip():
+                    print(result.stderr.strip(), file=sys.stderr)
+                if result.returncode != 0:
+                    raise RuntimeError("offline dictionary build failed; rerun with --no-dictionary to skip it")
+                with io.open(dict_path, encoding="utf-8") as file:
+                    dictionary = json.load(file)
+                if not isinstance(dictionary, dict):
+                    raise ValueError("dictionary builder did not return a JSON object")
+                output_html = set_dictionary_data(output_html, json.dumps(dictionary, ensure_ascii=False, separators=(",", ":")))
+                print("dictionary entries: %d" % len(dictionary))
+
+        refs = external_resource_references(output_html)
+        if refs:
+            raise ValueError("reader template still has external resource references; refusing to write an online-dependent book")
+        os.makedirs(os.path.dirname(out_path) or ".", exist_ok=True)
+        fd, temp_output = tempfile.mkstemp(prefix=".book-", suffix=".html", dir=os.path.dirname(out_path) or ".")
+        try:
+            with os.fdopen(fd, "w", encoding="utf-8") as file:
+                file.write(output_html)
+            os.replace(temp_output, out_path)
+        except Exception:
+            try:
+                os.unlink(temp_output)
+            except OSError:
+                pass
+            raise
+
+        print("wrote %s" % out_path)
+        print("  pages: %d | body font: %.1fpt | toc entries: %d" % (total, body_size, len(toc)))
+        print("  digit order repair: %s" % ("on" if reverse_digits else "off"))
+        print("  removed %d remote/tracker script(s)" % removed_scripts)
+        print("  file: %.1f MB (embedded page images: %.1f MB)" % (os.path.getsize(out_path) / 1e6, image_bytes / 1e6))
+        print("  sections: %d" % output_html.count('class="source-page"'))
+        return 0
+    except Exception as error:  # provide a useful command-line failure instead of a traceback
+        print("ERROR: %s" % error, file=sys.stderr)
+        return 1
 
 
 if __name__ == "__main__":
-    main()
+    sys.exit(main())
