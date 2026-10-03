@@ -59,9 +59,12 @@ the tests — is on me.
 - **Save over my book** needs the File System Access API: Chrome / Edge / Opera on
   desktop, and it must be called from a click. Firefox and Safari get "Save into
   HTML" only.
-- **PDF / EPUB / MOBI are a different job.** They first have to become a paged HTML
-  with a text layer (that means pagination, and OCR if there is no text). Send one
-  and I will tell you what it would take; it is not a same-day rebuild.
+- **PDF is supported directly — EPUB / MOBI are a different job.** A text PDF goes
+  straight through the one-command route in section 4 (pagination, clean-up, a
+  navigation tree and the offline dictionary all happen automatically; a 267-page
+  novel takes well under a minute). Scanned-only PDFs need OCR first. EPUB and MOBI
+  still have to be turned into a paged HTML with a text layer before the toolkit
+  can touch them.
 - **Annotations live in two places**: the browser's storage for the book, *and* baked
   into any file you save or bake. Export (or Save into HTML) is the portable copy.
 
@@ -76,12 +79,23 @@ python3 build_enhanced.py --input mybook.html --output "My Book (annotated).html
 ```
 
 It re-keys the storage names, runs the four patchers, checks the result and runs the
-behaviour tests.  From a PDF, first:
+behaviour tests.
+
+**From a PDF, do not use that form** — the reader shell already contains the
+annotator, so the patchers must not run a second time. Use the PDF route instead,
+which needs only the input swapped:
 
 ```
-python3 pdf_to_book.py --pdf book.pdf --out mybook.html \
-    --title "My Book" --author "A. Author" [--facsimile webp --dpi 90 --quality 48]
+python3 build_enhanced.py --input book.pdf --output "My Book (annotated).html" \
+    --title "My Book" --author "A. Author" \
+    --prefix my-book-a-author --slug my-book --picker my-book-file \
+    [--facsimile webp] [--toc auto|pdf|headings|none] [--no-dictionary] [--skip-tests]
 ```
+
+`pdf_to_book.py` also works on its own (`--pdf book.pdf --out mybook.html --title …
+--author …`); its output is already a finished book, so **never feed it to
+build_enhanced.py afterwards** — that is the duplicate-anchor failure described in
+NOTES-FOR-A-FUTURE-ASSISTANT.md.
 
 `--facsimile` embeds a WebP picture of every page so the book keeps the
 "Original pages" view; without it the file is ~7x smaller and the view selector is

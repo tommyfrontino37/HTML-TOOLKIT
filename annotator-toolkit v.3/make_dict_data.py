@@ -29,13 +29,25 @@ try:
         nltk.data.find('corpora/wordnet')
     except LookupError:
         print("Downloading WordNet data...")
-        nltk.download('wordnet', quiet=True)
+        try:
+            # An offline machine with nltk installed but no corpus must fall
+            # through to the "(wordnet unavailable)" path below, not kill the
+            # build: the glossary and Webster sources can carry the book.
+            nltk.download('wordnet', quiet=True)
+        except Exception as exc:                          # noqa: BLE001
+            print("   (wordnet download failed: %s)" % exc)
 except ImportError:
     pass
 
 WEBSTER_URL = ("https://raw.githubusercontent.com/matthewreagan/"
                "WebstersEnglishDictionary/master/dictionary.json")
-WEBSTER_CACHE = "/tmp/wrn1913.json"
+# The cache used to live in /tmp, which containers wipe between sessions and
+# which every session re-downloaded 22 MB into. Prefer the user cache; keep
+# reading the old location so existing machines do not re-download.
+LEGACY_WEBSTER_CACHE = "/tmp/wrn1913.json"
+WEBSTER_CACHE = os.path.join(
+    os.environ.get("XDG_CACHE_HOME") or os.path.join(os.path.expanduser("~"), ".cache"),
+    "html-toolkit-wrn1913.json")
 
 SOURCES = ("glossary", "wordnet", "webster")
 
@@ -80,11 +92,21 @@ def book_vocabulary(path):
     return {w for w in counts if len(w) > 2}
 
 
-def load_webster():
-    if not os.path.exists(WEBSTER_CACHE):
+def load_webster(url=WEBSTER_URL):
+    cache = WEBSTER_CACHE
+    if not os.path.exists(cache) and os.path.exists(LEGACY_WEBSTER_CACHE):
+        cache = LEGACY_WEBSTER_CACHE                      # reuse an earlier download
+    if not os.path.exists(cache):
         print("   fetching Webster's 1913 (22 MB, cached for next time)…")
-        urllib.request.urlretrieve(WEBSTER_URL, WEBSTER_CACHE)
-    data = json.load(io.open(WEBSTER_CACHE, encoding="utf-8"))
+        try:
+            os.makedirs(os.path.dirname(cache) or ".", exist_ok=True)
+            urllib.request.urlretrieve(url, cache)
+        except Exception:                                 # noqa: BLE001
+            # Not fatal: fall back to the legacy path (writable almost anywhere)
+            # so a read-only or missing ~/.cache cannot stop the build.
+            cache = LEGACY_WEBSTER_CACHE
+            urllib.request.urlretrieve(url, cache)
+    data = json.load(io.open(cache, encoding="utf-8"))
     return {k.lower(): v for k, v in data.items()}
 
 
@@ -93,6 +115,8 @@ def main():
     ap.add_argument("--book", required=True)
     ap.add_argument("--out", required=True)
     ap.add_argument("--no-webster", action="store_true")
+    ap.add_argument("--webster-url", default=WEBSTER_URL,
+                    help="override the Webster's 1913 source URL")
     args = ap.parse_args()
 
     sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
@@ -103,6 +127,10 @@ def main():
 
     try:
         from nltk.corpus import wordnet as wn
+        # nltk corpora are loaded lazily: the import above succeeds even when
+        # the corpus is missing, and the LookupError only fires at first use -
+        # by which point it is outside this guard. Force the load here.
+        wn.synsets("the")
         have_wn = True
     except Exception:                                     # noqa: BLE001
         have_wn = False
@@ -111,7 +139,7 @@ def main():
     webster = {}
     if not args.no_webster:
         try:
-            webster = load_webster()
+            webster = load_webster(args.webster_url)
         except Exception as exc:                          # noqa: BLE001
             print("   (webster unavailable: %s)" % exc)
 
@@ -129,7 +157,14 @@ def main():
         # 2. WordNet
         if hit is None and have_wn:
             for f in forms:
-                ss = wn.synsets(f)
+                try:
+                    ss = wn.synsets(f)
+                except Exception as exc:                  # noqa: BLE001
+                    # Corpus vanished or was never fully downloaded: stop using
+                    # WordNet and let the glossary/Webster sources carry on.
+                    have_wn = False
+                    print("   (wordnet failed mid-run: %s; continuing without it)" % exc)
+                    break
                 if ss:
                     hit = ("wordnet", [x.definition()[:160] for x in ss[:2]], f)
                     break

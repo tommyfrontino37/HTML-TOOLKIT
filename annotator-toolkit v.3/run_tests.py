@@ -12,12 +12,53 @@ book's keys.
 
 import argparse
 import json
+import re
 import sys
 from pathlib import Path
 
 from playwright.sync_api import sync_playwright
 
 RESULTS = []
+
+DICT_DATA_RE = re.compile(
+    r'<script type="application/json" id="dict-data">(.*?)</script>', re.S)
+
+
+def choose_dict_probe(book_path, preferred=""):
+    """Pick a probe word this book can actually define.
+
+    The offline dictionary holds only the book's own vocabulary, so a
+    hard-coded probe word (as this suite once used) fails on any book that
+    never uses it, while the feature itself works fine. Prefer an explicit
+    --dict-word; otherwise take the longest dictionary word that also appears
+    in the visible text.
+    """
+    try:
+        source = Path(book_path).read_text(encoding="utf-8", errors="replace")
+    except OSError:
+        return ""
+    match = DICT_DATA_RE.search(source)
+    if not match:
+        return ""
+    try:
+        entries = json.loads(match.group(1).replace("\\u003c", "<"))
+    except ValueError:
+        return ""
+
+    preferred = (preferred or "").strip().lower()
+    if preferred:
+        if preferred in entries:
+            return preferred
+        print("  ! --dict-word %r is not in this book's dictionary; choosing one instead"
+              % preferred)
+
+    body = " ".join(re.findall(r'<div class="reading-content">(.*?)</div>', source, re.S))
+    body = re.sub(r"<[^>]+>", " ", body).lower()
+    for word in sorted((w for w in entries if isinstance(w, str) and re.fullmatch(r"[a-z]{5,12}", w)),
+                       key=len, reverse=True):
+        if re.search(r"\b%s\b" % re.escape(word), body):
+            return word
+    return ""
 
 
 def check(name, cond, detail=""):
@@ -72,6 +113,8 @@ def main():
     ap.add_argument("--prefix", required=True)
     ap.add_argument("--orig-views", action="store_true")
     ap.add_argument("--page", type=int, default=0, help="a mid-book page to test in")
+    ap.add_argument("--dict-word", default="",
+                    help="word used for the Define test (default: chosen from the book's own dictionary)")
     args = ap.parse_args()
 
     book = Path(args.book).resolve()
@@ -268,20 +311,26 @@ def main():
               js("window.__ow.writes"))
 
         # ---------------------------------------------------------------- dictionary
-        if js("!!document.querySelector('.hl-pop .dict-define')"):
+        probe = choose_dict_probe(book, args.dict_word)
+        if js("!!document.querySelector('.hl-pop .dict-define')") and not probe:
             print("  -- dictionary")
-            js("""(function(){
+            check("Define shows a definition for a selected word", False,
+                  "no probe word available in this book's dictionary data")
+        elif probe:
+            print("  -- dictionary (probe word: %s)" % probe)
+            selected = js("""(function(){
               var s = window.getSelection(); s.removeAllRanges();
               var el = document.querySelector('#ann-list'); if(el) el.innerHTML = '';
+              var pattern = new RegExp(%s);
               var pages = document.querySelectorAll('.source-page');
               for(var i = 0; i < pages.length; i++){
                 var c = pages[i].querySelector('.reading-content'); if(!c) continue;
                 var w = document.createTreeWalker(c, NodeFilter.SHOW_TEXT, null), n;
                 while((n = w.nextNode())){
-                  var m = /\\bsin\\b/.exec(n.nodeValue || '');
+                  var m = pattern.exec(n.nodeValue || '');
                   if(m){
                     var r = document.createRange();
-                    r.setStart(n, m.index); r.setEnd(n, m.index + 3);
+                    r.setStart(n, m.index); r.setEnd(n, m.index + m[0].length);
                     s.removeAllRanges(); s.addRange(r);
                     pages[i].scrollIntoView();
                     document.dispatchEvent(new MouseEvent('mouseup', {bubbles: true}));
@@ -290,13 +339,14 @@ def main():
                 }
               }
               return false;
-            })()""")
+            })()""" % json.dumps(r"\b%s\b" % probe))
             page.wait_for_timeout(500)
+            check("the probe word can be selected", selected, probe)
             click(".hl-pop .dict-define")
             page.wait_for_timeout(500)
             shown = js("""(function(){ var c = document.getElementById('dict-card');
                 return c && !c.hidden ? c.textContent.replace(/\\s+/g,' ').trim() : ''; })()""")
-            check("Define shows a definition for a selected word",
+            check("Define shows a definition for a selected word (%s)" % probe,
                   len(shown) > 40 and "No entry" not in shown, shown[:160])
             check("the definition names its source",
                   "Glossary" in shown or "WordNet" in shown or "Webster" in shown, shown[:120])

@@ -205,6 +205,81 @@ def repair_drop_caps(elements):
     return elements
 
 
+UNTITLED_RE = re.compile(r"^\(?\s*untitled\s*\)?$", re.I)
+RUNNING_HEAD_WINDOW = 2   # a heading repeated within this many pages is furniture
+
+
+def clean_outline(toc, total):
+    """Return (entries, usable) for a PDF outline.
+
+    Retail PDFs often carry a degenerate outline: entries titled "(Untitled)",
+    duplicates, or every entry pointing at the same page. Passing that straight
+    into the reader shell yields a table of contents that cannot be used, so
+    filter it and report whether what is left is worth showing.
+    """
+    entries, seen = [], set()
+    for title, page_no in toc:
+        title = re.sub(r"\s+", " ", str(title or "")).strip()
+        if not title or UNTITLED_RE.match(title):
+            continue
+        try:
+            page_no = max(1, min(total, int(page_no)))
+        except (TypeError, ValueError):
+            continue
+        key = (title.casefold(), page_no)
+        if key in seen:
+            continue
+        seen.add(key)
+        entries.append((title, page_no))
+    pages = {page_no for _, page_no in entries}
+    return entries, len(entries) >= 2 and len(pages) >= 2
+
+
+def is_identity_heading(text, title="", author=""):
+    """True for a title-page heading that just repeats the book's identity."""
+    if not title:
+        return False
+    flat = re.sub(r"\s+", " ", text).casefold()
+    if flat == title.casefold():
+        return True
+    return title.casefold() in flat and bool(author) and author.casefold() in flat
+
+
+def detect_headings(doc, body_size, total, reverse_arabic_digits=False, title="", author=""):
+    """Build a table of contents from the pages' own big-text headings.
+
+    Uses the same size thresholds as build_reading_content(), so what is set as
+    an <h2> in the book is what appears in the navigation. Larger headings win;
+    h3 is used only when a book has no h2 at all. A heading repeated within
+    RUNNING_HEAD_WINDOW pages is a running head and is dropped, while a title
+    that legitimately recurs much later (e.g. "Chapter 1" in each part) is kept.
+    """
+    for kind_wanted in ("h2", "h3"):
+        entries, last_page = [], {}
+        for index in range(total):
+            page_no = index + 1
+            for kind, lines in page_lines(doc[index], body_size, reverse_arabic_digits):
+                if kind != kind_wanted:
+                    continue
+                text = " ".join(line[0].strip() for line in lines if line[0].strip())
+                text = re.sub(r"\s+", " ", text).strip()
+                if not 2 <= len(text) <= 120:
+                    continue
+                if looks_like_furniture(text) or UNTITLED_RE.match(text):
+                    continue
+                if is_identity_heading(text, title, author):
+                    continue
+                key = text.casefold()
+                if page_no - last_page.get(key, -RUNNING_HEAD_WINDOW) <= RUNNING_HEAD_WINDOW:
+                    last_page[key] = page_no
+                    continue
+                last_page[key] = page_no
+                entries.append((text, page_no))
+        if entries:
+            return entries
+    return []
+
+
 def build_reading_content(page, body_size, page_no, total, reverse_arabic_digits=False):
     elements = []
     line_no = 0
@@ -482,6 +557,9 @@ def main():
     parser.add_argument("--quality", type=int, default=50)
     parser.add_argument("--digit-order", choices=["auto", "normal", "reverse-arabic"], default="auto",
                         help="auto-detect reversed Arabic-Indic digit runs in Latin-text PDFs")
+    parser.add_argument("--toc", choices=["auto", "pdf", "headings", "none"], default="auto",
+                        help="navigation source: auto (outline when usable, else headings), "
+                             "pdf (outline only), headings (scan the pages), none (no navigation)")
     parser.add_argument("--no-dictionary", action="store_true",
                         help="omit dictionary UI/data; useful for offline builds without NLP data")
     args = parser.parse_args()
@@ -534,8 +612,43 @@ def main():
         toc = []
         for _, title, page_no in doc.get_toc():
             title = re.sub(r"\s+", " ", clean_text(title, reverse_digits)).strip()
-            if title:
-                toc.append((title, max(1, min(total, page_no))))
+            toc.append((title, page_no))
+        outline, outline_usable = clean_outline(toc, total)
+        raw_count = len(toc)
+        raw_pages = len({page_no for _, page_no in toc})
+
+        def headings_toc():
+            print("   scanning page headings for navigation\u2026")
+            return detect_headings(doc, body_size, total, reverse_digits, args.title, args.author)
+
+        if args.toc == "none":
+            toc, source = [], "none"
+        elif args.toc == "pdf":
+            toc, source = outline, "PDF outline"
+            if not toc:
+                print("WARNING: --toc pdf, but this PDF has no usable outline; navigation will be empty")
+        elif args.toc == "headings":
+            toc, source = headings_toc(), "page headings"
+        else:                                             # auto
+            if outline_usable:
+                toc, source = outline, "PDF outline"
+            else:
+                if raw_count:
+                    print("WARNING: PDF outline unusable (%d entries pointing at %d unique page(s)); "
+                          "building navigation from the pages' own headings"
+                          % (raw_count, raw_pages))
+                else:
+                    print("NOTE: this PDF has no outline; building navigation from the "
+                          "pages' own headings")
+                toc, source = headings_toc(), "page headings"
+        if args.toc == "auto" and source == "PDF outline" and len(outline) != raw_count:
+            print("NOTE: dropped %d unusable or duplicate outline entry/entries"
+                  % (raw_count - len(outline)))
+        if toc:
+            print("navigation: %d entries from the %s" % (len(toc), source))
+        elif args.toc != "none":
+            print("WARNING: no navigation entries found; the table of contents will be empty "
+                  "(use --toc pdf|headings|none to choose)")
 
         with io.open(SHELL, encoding="utf-8") as file:
             shell = file.read()

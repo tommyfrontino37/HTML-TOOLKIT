@@ -173,8 +173,19 @@ def check_output(workfile, args, is_pdf, no_dictionary):
 
     if is_pdf:
         check("PDF pages converted", book.count('class="source-page"') > 0)
+        page_layer = re.sub(r"<script\b.*?</script\s*>", "", book, flags=re.I | re.S)
+        headings = len(re.findall(r"<h2[^>]*>", page_layer))
+        destinations = len(re.findall(r'<option value="\d+">', page_layer))
+        print("   %s navigation has %d destination(s) for %d heading(s) on the page layer"
+              % ("OK  " if destinations or not headings else "WARN", destinations, headings))
+        if headings and not destinations:
+            print("        the book has headings but no navigation; rebuild with --toc headings")
     if not shutil.which("node"):
-        check("Node.js is installed for script checks", False)
+        if args.require_node:
+            check("Node.js is installed for script checks", False)
+        else:
+            print("   SKIP all inline JavaScript passes node --check (Node.js not installed; "
+                  "install it, or pass --require-node to make this fatal)")
     else:
         scripts = []
         for opening, body, _closing in SCRIPT_RE.findall(book):
@@ -211,6 +222,14 @@ def main():
     parser.add_argument("--quality", type=int, default=50, help="PDF WebP quality (1-100)")
     parser.add_argument("--digit-order", choices=["auto", "normal", "reverse-arabic"], default="auto",
                         help="PDF-only order handling for Arabic-Indic digit runs")
+    parser.add_argument("--toc", choices=["auto", "pdf", "headings", "none"], default="auto",
+                        help="PDF-only navigation source: auto (outline when usable, else page headings), "
+                             "pdf, headings, none")
+    parser.add_argument("--require-node", action="store_true",
+                        help="fail when Node.js is missing instead of skipping the inline-JS syntax check")
+    parser.add_argument("--dict-word", default="",
+                        help="word the behavior tests use for the Define check "
+                             "(default: chosen from the book's own dictionary)")
     args = parser.parse_args()
 
     for field in ("prefix", "slug", "picker"):
@@ -253,6 +272,7 @@ def main():
                 "--dpi", str(args.dpi),
                 "--quality", str(args.quality),
                 "--digit-order", args.digit_order,
+                "--toc", args.toc,
             ]
             if args.no_dictionary:
                 command.append("--no-dictionary")
@@ -302,8 +322,6 @@ def main():
                 behavior_page_count = check_file.read().count('class="source-page"')
             if behavior_page_count < 20:
                 print("BEHAVIOR TESTS: skipped for short document (<20 pages); structural checks passed")
-            elif not shutil.which("node"):
-                failures.append("Node.js is required for the behavior tests")
             else:
                 playwright_code, _ = run([sys.executable, "-c", "import playwright"])
                 if playwright_code != 0:
@@ -317,6 +335,8 @@ def main():
                         "--title", args.title,
                         "--prefix", args.prefix,
                     ]
+                    if args.dict_word:
+                        command += ["--dict-word", args.dict_word]
                     if args.orig_views or (pdf_input and args.facsimile == "webp"):
                         command.append("--orig-views")
                     code, output = run(command, cwd=TOOLKIT_DIR)

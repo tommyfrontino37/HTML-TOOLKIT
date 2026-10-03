@@ -41,9 +41,38 @@ PDF OPTIONS
   --digit-order auto     Detect reversed Arabic-Indic runs in Latin-text PDFs.
   --digit-order normal   Leave digit order as extracted.
   --digit-order reverse-arabic  Force-reverse Arabic-Indic digit sequences.
+  --toc auto             Where navigation comes from (default: auto).
+                           auto      the PDF outline when it is usable, otherwise
+                                     the pages' own headings
+                           pdf       the outline only
+                           headings  scan the pages' big-text headings
+                           none      no navigation
+                         A retail PDF whose outline is broken (entries titled
+                         "(Untitled)", duplicates, or every entry on one page) is
+                         detected and replaced with a heading scan, with a warning
+                         on stdout. Use --toc headings to force the scan.
   --no-dictionary        Omit dictionary scripts, styles, and data.
+  --dict-word WORD       Word the behavior tests use for the Define check.
+                         Default: chosen from the book's own dictionary.
+  --require-node         Fail when Node.js is missing, instead of skipping the
+                         inline-JavaScript syntax check.
   --skip-tests           Skip Playwright behavior tests; structural and JavaScript
                          checks still run.
+
+REQUIREMENTS
+------------
+Python 3 with the packages in requirements.txt. Playwright's Chromium is needed
+only for the behavior tests:
+
+    python3 -m playwright install chromium && python3 -m playwright install-deps chromium
+
+Node.js is optional: if it is installed, build_enhanced.py runs `node --check`
+over every inline script; if it is missing, that check is skipped with a notice
+(add --require-node if you want it to be fatal instead).
+
+Offline machines: a missing WordNet corpus, a missing Webster file, or a missing
+nltk install all degrade to the sources that are available (glossary, then
+Webster's 1913) instead of failing the build. See CHANGELOG.md.
 
 The direct PDF converter is also available:
     python3 pdf_to_book.py --pdf "book.pdf" --out "My Book.html" \
