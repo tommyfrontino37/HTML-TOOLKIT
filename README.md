@@ -23,7 +23,7 @@ python annotator-toolkit/build\_enhanced.py \\
   --prefix "book-slug" \\
   --slug "book-slug" \\
   --picker "book-file" \\
-  --no-dictionary
+ 
 ```
 Each book receives unique browser storage keys based on `--prefix`, so highlights,
 notes, themes, and saved file handles cannot leak between books.
@@ -32,4 +32,4 @@ By default, the enhanced build creates a dictionary containing only words found
 in the book. It uses the included theological glossary first, then WordNet and
 Webster's 1913 where available. The dictionary is embedded as JSON inside the
 HTML file; no internet connection is needed when reading the finished book.
-Use `--no-dictionary` to omit it.
+
