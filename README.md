@@ -20,9 +20,11 @@ python3 build_enhanced.py \
 ```
 
 The output is a single HTML file that works offline in any modern browser.
-`build_enhanced.py` checks the browser up front, so a broken environment
-fails in seconds with the exact fix commands instead of after the whole
-conversion.
+On a fresh machine `build_enhanced.py` repairs its own test environment:
+if Chromium cannot launch it installs the browser, and (when `sudo` works
+without a password) its system libraries, then continues. Add
+`--no-auto-setup` to get the fix commands instead, or `--skip-tests` to
+build without the browser suite.
 
 ## Documentation
 

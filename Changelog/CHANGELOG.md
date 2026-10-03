@@ -1,5 +1,32 @@
 # Changelog
 
+## Unreleased — the build repairs its own test environment
+
+Found the hard way in a fresh session (2026-10-03): the merged fail-fast
+precheck diagnosed a missing-Chromium environment correctly, but nothing in
+that session executed the fix, so the book shipped without the 41-test
+interactive suite. Diagnosing was never the bottleneck; doing was.
+
+### Changed
+
+- `browser_preflight()` now self-heals: when the launch probe fails it runs
+  `python3 -m playwright install chromium`, and if that is not enough and
+  `sudo -n true` succeeds, `sudo -n python3 -m playwright install-deps
+  chromium`, probing again after each step. A clean session therefore turns
+  the single build command into the whole setup; the old hint-only behavior
+  remains available as `--no-auto-setup`, and `--skip-tests` still bypasses
+  the browser entirely.
+- README quick start documents the self-repair and the two opt-out flags.
+
+### Verified
+
+- Purged `libnspr4` / `libnss3` / `libasound2t64` and pointed
+  `PLAYWRIGHT_BROWSERS_PATH` at an empty directory (a fresh session's state):
+  the build reinstalled the browser and the libraries by itself and finished
+  `RESULT: 41 passed, 0 failed`.
+- Same broken environment with `--no-auto-setup`: aborts in ~1s with the fix
+  hint, nothing converted.
+
 ## Unreleased — environment failures now fail fast, with instructions
 
 Found while converting *Christ and His Threefold Office* (John Flavel, 143 pages,

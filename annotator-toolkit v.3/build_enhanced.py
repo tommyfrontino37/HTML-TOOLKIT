@@ -62,16 +62,9 @@ def run(command, **kwargs):
     return process.returncode, (process.stdout or "") + (process.stderr or "")
 
 
-def browser_preflight():
+def _browser_launch_probe():
     """Launch headless Chromium exactly the way run_tests.py does.
-
-    A shallow `import playwright` check passes even when the browser binary
-    is missing or its system libraries are not installed; the build then
-    completed all of its heavy work before dying inside the behavior suite
-    amid Playwright debug spew. Launching the browser up front turns that
-    into a fast abort with an actionable fix.
-    Returns (ok, hint).
-    """
+    Returns (ok, raw_output)."""
     probe = (
         "from playwright.sync_api import sync_playwright\n"
         "with sync_playwright() as pw:\n"
@@ -79,8 +72,10 @@ def browser_preflight():
         "    browser.close()\n"
     )
     code, output = run([sys.executable, "-c", probe])
-    if code == 0:
-        return True, ""
+    return code == 0, output
+
+
+def _launch_error_hint(output):
     # The real cause is the last `SomeError: message` line of the traceback;
     # everything after it is Playwright's box-drawn advice frame.
     lines = [line.strip().lstrip("║").strip()
@@ -90,7 +85,7 @@ def browser_preflight():
         match = re.match(r"^[\w.]*(?:Error|Exception):\s*(.+)$", line)
         if match:
             tail = match.group(1).strip()
-    hint = (
+    return (
         "   Chromium cannot launch: %s\n"
         "   Fix it with:\n"
         "       python3 -m playwright install chromium\n"
@@ -98,7 +93,41 @@ def browser_preflight():
         "   Or build without browser tests by adding --skip-tests."
         % tail[:220]
     )
-    return False, hint
+
+
+def browser_preflight(auto_setup):
+    """Ensure the behavior-test browser can launch; repair the environment if not.
+
+    Fresh sessions start from a clean OS: pip packages may be present while the
+    Chromium binary and its system libraries are not, and a hint-only abort
+    still left the fix to a human (or another assistant) in every new session.
+    So when the launch probe fails and auto_setup is enabled, install the
+    browser, then the system libraries (sudo only when it works without a
+    password), probing again after each step. Abort with the fix hint only if
+    the repair fails or is disabled (--no-auto-setup). Returns (ok, hint).
+    """
+    ok, output = _browser_launch_probe()
+    if ok:
+        return True, ""
+    if auto_setup:
+        print("   Chromium cannot launch; repairing environment:")
+        print("   1/2 python3 -m playwright install chromium")
+        code, out = run([sys.executable, "-m", "playwright", "install", "chromium"])
+        if code != 0:
+            print("       " + (out.strip().splitlines() or ["failed"])[-1])
+        ok, output = _browser_launch_probe()
+        if not ok:
+            sudo_code, _ = run(["sudo", "-n", "true"])
+            if sudo_code == 0:
+                print("   2/2 sudo -n python3 -m playwright install-deps chromium")
+                code, out = run(["sudo", "-n", sys.executable, "-m",
+                                 "playwright", "install-deps", "chromium"])
+                if code != 0:
+                    print("       " + (out.strip().splitlines() or ["failed"])[-1])
+                ok, output = _browser_launch_probe()
+        if ok:
+            return True, ""
+    return False, _launch_error_hint(output)
 
 
 def is_pdf_file(path):
@@ -254,6 +283,9 @@ def main():
     parser.add_argument("--slug", required=True, help="download/book slug, e.g. my-book")
     parser.add_argument("--picker", required=True, help="unique file-picker id, e.g. my-book-file")
     parser.add_argument("--skip-tests", action="store_true", help="skip Playwright behavior tests")
+    parser.add_argument("--no-auto-setup", action="store_true",
+                        help="do not auto-install Chromium / its system libraries "
+                             "when the behavior-test browser cannot launch")
     parser.add_argument("--no-dictionary", action="store_true", help="omit the offline dictionary")
     parser.add_argument("--orig-views", action="store_true", help="HTML input has Original pages view")
     parser.add_argument("--facsimile", choices=["none", "webp"], default="none", help="PDF-only original-page images")
@@ -294,7 +326,7 @@ def main():
         # a missing Chromium or missing system libraries used to burn the whole
         # pipeline and then fail late, inside Playwright's debug output.
         print("PRECHECK: behavior-test browser")
-        browser_ok, browser_hint = browser_preflight()
+        browser_ok, browser_hint = browser_preflight(not args.no_auto_setup)
         if not browser_ok:
             print(browser_hint)
             print("BUILD FAILED: Chromium cannot launch (see precheck above)", file=sys.stderr)
