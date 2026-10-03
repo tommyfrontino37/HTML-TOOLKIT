@@ -20,7 +20,15 @@ DST = "/home/user/The Doctrine of Repentance - Thomas Watson.html"
 html = io.open(SRC, encoding="utf-8").read()
 
 
+import re
 def sub_once(text, old, new, label):
+    if old.startswith('^R'):
+        pattern = old[2:]
+        if not re.search(pattern, text):
+            sys.exit("FAIL [%s]: anchor not found" % label)
+        print("ok  [%s]" % label)
+        return re.sub(pattern, new, text, count=1)
+    
     n = text.count(old)
     if n < 1:
         sys.exit("FAIL [%s]: anchor found %d times" % (label, n))
@@ -110,7 +118,7 @@ html = sub_once(html, PRINT_ANCHOR, DARK_CSS + PRINT_ANCHOR, "dark palette css")
 # --------------------------------------------------------------------------
 # 3. printing always renders black on white
 # --------------------------------------------------------------------------
-PRINT_BODY = "body{background:#fff}"
+PRINT_BODY = "^Rbody\\{background:#fff[^}]*\\}"
 PRINT_OVERRIDES = (
     "body{background:#fff;color:#000}"
     'html[data-theme="dark"] body{background:#fff;color:#000}'

@@ -23,6 +23,16 @@ import re
 import sys
 import urllib.request
 
+try:
+    import nltk
+    try:
+        nltk.data.find('corpora/wordnet')
+    except LookupError:
+        print("Downloading WordNet data...")
+        nltk.download('wordnet', quiet=True)
+except ImportError:
+    pass
+
 WEBSTER_URL = ("https://raw.githubusercontent.com/matthewreagan/"
                "WebstersEnglishDictionary/master/dictionary.json")
 WEBSTER_CACHE = "/tmp/wrn1913.json"

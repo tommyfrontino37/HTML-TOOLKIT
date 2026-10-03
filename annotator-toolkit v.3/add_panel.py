@@ -431,8 +431,8 @@ PANEL_JS = """
  }
  function markdown(){
   const t = totals();
-  let out = '# The Doctrine of Repentance \\u2014 my notes & highlights\\n\\n';
-  out += '_Thomas Watson \\u00b7 exported ' + stamp() + ' \\u00b7 ' + t.label + '_\\n\\n';
+  let out = `# The Doctrine of Repentance \\u2014 my notes & highlights\\n\\n`;
+  out += `_Thomas Watson \\u00b7 exported ${stamp()} \\u00b7 ${t.label}_\\n\\n`;
   let chapter = null;
   clusters.forEach(function(c){
    if(c.chapter !== chapter){ chapter = c.chapter; if(chapter) out += '## ' + chapter + '\\n\\n'; }
@@ -455,7 +455,7 @@ PANEL_JS = """
   });
   return '<!DOCTYPE html>\\n<html lang="en"><head><meta charset="utf-8">' +
    '<meta name="viewport" content="width=device-width, initial-scale=1">' +
-   '<title>My notes \\u2014 The Doctrine of Repentance</title><style>' +
+   `<title>My notes \\u2014 The Doctrine of Repentance</title><style>` +
    'body{max-width:760px;margin:0 auto;padding:32px 20px 60px;background:#fffefa;color:#272923;' +
    'font:16px/1.65 Georgia,"Times New Roman",serif}' +
    'h1{font-size:27px;font-weight:normal;line-height:1.25;margin:0 0 6px}' +
@@ -469,8 +469,8 @@ PANEL_JS = """
    'footer{margin-top:34px;color:#72746b;font:12px/1.6 system-ui,sans-serif}' +
    '@media print{body{padding:0}article{break-inside:avoid}}' +
    '</style></head><body>' +
-   '<h1>The Doctrine of Repentance \\u2014 my notes &amp; highlights</h1>' +
-   '<p class="sub">Thomas Watson \\u00b7 exported ' + stamp() + ' \\u00b7 ' + t.label + '</p>' +
+   `<h1>The Doctrine of Repentance \\u2014 my notes &amp; highlights</h1>` +
+   `<p class="sub">Thomas Watson \\u00b7 exported ${stamp()} \\u00b7 ${t.label}</p>` +
    '<section>' + body + '</section>' +
    '<footer>Saved from your own copy of the HTML edition. Highlights are marked by colour; notes appear beneath the quote they belong to.</footer>' +
    '</body></html>';
@@ -480,7 +480,7 @@ PANEL_JS = """
  const EXPORT_NAME = 'doctrine-of-repentance-annotations.json';
  document.getElementById('ann-export').addEventListener('click', function(){
   const data = {
-   app: 'The Doctrine of Repentance (HTML edition)',
+   app: `The Doctrine of Repentance (HTML edition)`,
    version: 1,
    exported: new Date().toISOString(),
    highlights: api.getStore(),
@@ -555,7 +555,7 @@ PANEL_JS = """
  const APPLIED_KEY = 'watson-repentance-baked-applied';
  function bakedPayload(){
   return {
-   app: 'The Doctrine of Repentance (HTML edition)',
+   app: `The Doctrine of Repentance (HTML edition)`,
    version: 1,
    baked: String(Date.now()) + '-' + Math.floor(Math.random() * 1e6),
    bakedOn: new Date().toISOString(),
@@ -642,7 +642,7 @@ PANEL_JS = """
   setTimeout(function(){
    try{
     const out = bakedHTML(payload);
-    download('The Doctrine of Repentance (annotated ' + stamp() + ').html', out, 'text/html');
+    download(`The Doctrine of Repentance (annotated ${stamp()}).html`, out, 'text/html');
    }catch(err){
     api.setStatus('Could not build the annotated copy here \u2014 try opening the file in your browser');
    }
@@ -746,7 +746,7 @@ PANEL_JS = """
    catch(e2){ throw { name: 'UnreadableError', message: 'the file could not be read' }; }
    /* never write until we are sure this is the book */
    const looksRight = existing.indexOf('id="view-mode"') >= 0 &&
-                      existing.indexOf('The Doctrine of Repentance') >= 0 &&
+                      existing.indexOf(`The Doctrine of Repentance`) >= 0 &&
                       existing.indexOf('reading-content') >= 0;
    if(!looksRight) throw { name: 'NotBookError', message: 'not this book' };
    return handle;
@@ -754,7 +754,7 @@ PANEL_JS = """
   function fallbackDownload(reason){
    try{
     const out = bakedHTML(bakedPayload());
-    const name = 'The Doctrine of Repentance (annotated ' + stamp() + ').html';
+    const name = `The Doctrine of Repentance (annotated ${stamp()}).html`;
     const saved = download(name, out, 'text/html');
     if(saved) say(reason + ' - an annotated copy went to your Downloads instead.', 'warn');
     else say(reason + ' - use Save into HTML instead.', 'warn');
