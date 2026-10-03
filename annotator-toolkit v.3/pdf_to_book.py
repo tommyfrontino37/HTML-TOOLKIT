@@ -34,7 +34,14 @@ import tempfile
 import unicodedata
 from collections import Counter
 
-import pymupdf
+try:
+    import pymupdf
+except ImportError:
+    sys.stderr.write(
+        "pdf_to_book.py needs PyMuPDF. Install the toolkit's requirements:\n"
+        "    python3 -m pip install -r requirements.txt\n"
+    )
+    sys.exit(2)
 
 TOOLKIT_DIR = os.path.dirname(os.path.abspath(__file__))
 SHELL = os.path.join(TOOLKIT_DIR, "shell.html")
@@ -311,7 +318,14 @@ def build_reading_content(page, body_size, page_no, total, reverse_arabic_digits
 
 
 def render_page_image(doc, page_index, dpi, quality):
-    from PIL import Image
+    try:
+        from PIL import Image
+    except ImportError:
+        sys.stderr.write(
+            "--facsimile webp needs Pillow. Install it with:\n"
+            "    python3 -m pip install Pillow\n"
+        )
+        sys.exit(2)
 
     pixmap = doc[page_index].get_pixmap(dpi=dpi, colorspace=pymupdf.csGRAY)
     image = Image.frombytes("L", (pixmap.width, pixmap.height), pixmap.samples)

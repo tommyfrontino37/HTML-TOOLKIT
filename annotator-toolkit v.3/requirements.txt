@@ -1,4 +1,10 @@
-pymupdf
-Pillow
-nltk
-playwright
+# PDF conversion and page images (pdf_to_book.py)
+pymupdf>=1.24,<2
+Pillow>=10
+# Offline dictionary source (WordNet); degrades gracefully when unavailable
+nltk>=3.8
+# Behavior tests (build_enhanced.py). After installing, the Chromium browser
+# and its system libraries are still needed:
+#   python3 -m playwright install chromium
+#   python3 -m playwright install-deps chromium   (needs sudo/root)
+playwright>=1.44

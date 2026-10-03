@@ -1,5 +1,41 @@
 # Changelog
 
+## Unreleased — environment failures now fail fast, with instructions
+
+Found while converting *Christ and His Threefold Office* (John Flavel, 143 pages,
+2026-10-03) on a fresh machine: the build did all of its work — conversion,
+dictionary, structural checks — and then died inside the behavior suite because
+Chromium's system libraries were missing. Every change below was reproduced
+before and after.
+
+### Fixed
+
+- **`build_enhanced.py` checked Playwright too shallowly and too late.** The
+  behavior-test gate ran `python3 -c "import playwright"`, which passes even
+  when the Chromium binary is missing or its system libraries are not
+  installed; the full pipeline (~12 s of conversion and dictionary work) ran
+  anyway, then failed amid Playwright's process-debug spew. Now
+  `browser_preflight()` launches headless Chromium exactly the way
+  `run_tests.py` does, before any heavy work. A broken environment aborts in
+  ~2 s with the exact fix commands (`playwright install chromium`,
+  `playwright install-deps chromium` — which needs sudo — or `--skip-tests`).
+  Verified: with an empty `PLAYWRIGHT_BROWSERS_PATH` the build aborts before
+  conversion, leaves no work directory, and exits 1.
+- **A missing PyMuPDF produced a raw traceback** from `pdf_to_book.py`'s
+  module-level `import pymupdf`, reported only as `BUILD FAILED: PDF
+  conversion`. The import is now guarded with a one-line install instruction
+  (exit 2); the lazy `from PIL import Image` in the facsimile path is guarded
+  the same way for `--facsimile webp` runs.
+
+### Added
+
+- `requirements.txt` is version-floored (`pymupdf>=1.24,<2`, `Pillow>=10`,
+  `nltk>=3.8`, `playwright>=1.44`) and documents the two extra Playwright
+  install steps next to the dependency that needs them.
+- Root `README.md` gained the quick start (setup + one-command build) and a map
+  of the repository; previously the entire README was one sentence and the real
+  instructions were only in `annotator-toolkit v.3/README.txt`.
+
 ## v4.2 — navigation no longer trusts the PDF outline
 
 Found while converting a 267-page retail PDF (Grapevine India's *1984*, 2026-10-03).

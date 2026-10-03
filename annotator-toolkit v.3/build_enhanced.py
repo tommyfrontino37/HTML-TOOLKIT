@@ -62,6 +62,45 @@ def run(command, **kwargs):
     return process.returncode, (process.stdout or "") + (process.stderr or "")
 
 
+def browser_preflight():
+    """Launch headless Chromium exactly the way run_tests.py does.
+
+    A shallow `import playwright` check passes even when the browser binary
+    is missing or its system libraries are not installed; the build then
+    completed all of its heavy work before dying inside the behavior suite
+    amid Playwright debug spew. Launching the browser up front turns that
+    into a fast abort with an actionable fix.
+    Returns (ok, hint).
+    """
+    probe = (
+        "from playwright.sync_api import sync_playwright\n"
+        "with sync_playwright() as pw:\n"
+        "    browser = pw.chromium.launch()\n"
+        "    browser.close()\n"
+    )
+    code, output = run([sys.executable, "-c", probe])
+    if code == 0:
+        return True, ""
+    # The real cause is the last `SomeError: message` line of the traceback;
+    # everything after it is Playwright's box-drawn advice frame.
+    lines = [line.strip().lstrip("║").strip()
+             for line in (output or "").strip().splitlines()]
+    tail = "unknown error"
+    for line in lines:
+        match = re.match(r"^[\w.]*(?:Error|Exception):\s*(.+)$", line)
+        if match:
+            tail = match.group(1).strip()
+    hint = (
+        "   Chromium cannot launch: %s\n"
+        "   Fix it with:\n"
+        "       python3 -m playwright install chromium\n"
+        "       python3 -m playwright install-deps chromium   (needs sudo/root)\n"
+        "   Or build without browser tests by adding --skip-tests."
+        % tail[:220]
+    )
+    return False, hint
+
+
 def is_pdf_file(path):
     if path.lower().endswith(".pdf"):
         return True
@@ -244,16 +283,29 @@ def main():
         parser.error("input and output paths must be different")
     pdf_input = is_pdf_file(input_path)
     output_dir = os.path.dirname(output_path) or "."
-    os.makedirs(output_dir, exist_ok=True)
-    workdir = tempfile.mkdtemp(prefix=".build-%s-" % args.prefix, dir=output_dir)
-    workfile = os.path.join(workdir, "book.html")
-    dictionary_path = os.path.join(workdir, "dict_data.json")
-    failures = []
 
     print("=" * 74)
     print("BUILDING: %s (%s)" % (args.title, args.author))
     print("INPUT ROUTE: %s" % ("PDF conversion" if pdf_input else "HTML annotation"))
     print("=" * 74)
+
+    if not args.skip_tests:
+        # Launch the browser the way run_tests.py will, before any heavy work:
+        # a missing Chromium or missing system libraries used to burn the whole
+        # pipeline and then fail late, inside Playwright's debug output.
+        print("PRECHECK: behavior-test browser")
+        browser_ok, browser_hint = browser_preflight()
+        if not browser_ok:
+            print(browser_hint)
+            print("BUILD FAILED: Chromium cannot launch (see precheck above)", file=sys.stderr)
+            return 1
+        print("   Chromium launches ok")
+
+    os.makedirs(output_dir, exist_ok=True)
+    workdir = tempfile.mkdtemp(prefix=".build-%s-" % args.prefix, dir=output_dir)
+    workfile = os.path.join(workdir, "book.html")
+    dictionary_path = os.path.join(workdir, "dict_data.json")
+    failures = []
 
     try:
         if pdf_input:
@@ -323,26 +375,23 @@ def main():
             if behavior_page_count < 20:
                 print("BEHAVIOR TESTS: skipped for short document (<20 pages); structural checks passed")
             else:
-                playwright_code, _ = run([sys.executable, "-c", "import playwright"])
-                if playwright_code != 0:
-                    failures.append("behavior tests need Playwright (install it or use --skip-tests)")
-                else:
-                    print("BEHAVIOR TESTS")
-                    command = [
-                        sys.executable,
-                        os.path.join(TOOLKIT_DIR, "run_tests.py"),
-                        "--book", workfile,
-                        "--title", args.title,
-                        "--prefix", args.prefix,
-                    ]
-                    if args.dict_word:
-                        command += ["--dict-word", args.dict_word]
-                    if args.orig_views or (pdf_input and args.facsimile == "webp"):
-                        command.append("--orig-views")
-                    code, output = run(command, cwd=TOOLKIT_DIR)
-                    print("\n".join(output.strip().splitlines()[-8:]))
-                    if code != 0:
-                        failures.append("behavior tests (install Playwright/Chromium system dependencies or use --skip-tests)")
+                print("BEHAVIOR TESTS")
+                command = [
+                    sys.executable,
+                    os.path.join(TOOLKIT_DIR, "run_tests.py"),
+                    "--book", workfile,
+                    "--title", args.title,
+                    "--prefix", args.prefix,
+                ]
+                if args.dict_word:
+                    command += ["--dict-word", args.dict_word]
+                if args.orig_views or (pdf_input and args.facsimile == "webp"):
+                    command.append("--orig-views")
+                code, output = run(command, cwd=TOOLKIT_DIR)
+                print("\n".join(output.strip().splitlines()[-8:]))
+                if code != 0:
+                    failures.append("behavior tests failed (output above; if the browser "
+                                    "broke mid-run, fix the environment or use --skip-tests)")
 
         if failures:
             print("BUILD FAILED: " + "; ".join(failures), file=sys.stderr)
