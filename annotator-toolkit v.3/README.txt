@@ -122,6 +122,7 @@ FILES
 -----
   build_enhanced.py     one command for PDF or pristine HTML input
   pdf_to_book.py        PDF -> paged, annotated HTML
+  resource_checks.py    shared checker for embedded/offline HTML and CSS resources
   make_dict_data.py    builds book-specific offline dictionary entries
   glossary.py           hand-written definitions and preferred senses
   add_dark_mode.py      theme-toggle patcher for pristine HTML

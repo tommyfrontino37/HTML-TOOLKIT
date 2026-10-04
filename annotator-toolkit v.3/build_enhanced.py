@@ -33,6 +33,15 @@ import sys
 import tempfile
 
 TOOLKIT_DIR = os.path.dirname(os.path.abspath(__file__))
+if TOOLKIT_DIR not in sys.path:
+    sys.path.insert(0, TOOLKIT_DIR)
+
+from resource_checks import (  # noqa: E402
+    external_resource_references,
+    is_remote_resource_url,
+    parse_start_tag_attributes,
+)
+
 PDF_CONVERTER = os.path.join(TOOLKIT_DIR, "pdf_to_book.py")
 PATCHERS = [
     "add_dark_mode.py",
@@ -48,8 +57,6 @@ SUBSTITUTIONS = [
     ("watson-repentance", "@PREFIX@"),
     ("doctrine-of-repentance", "@SLUG@"),
     ("doctrine-book", "@PICKER@"),
-    ("The Doctrine of Repentance", "@TITLE@"),
-    ("Thomas Watson", "@AUTHOR@"),
 ]
 SCRIPT_RE = re.compile(r"(<script\b[^>]*>)(.*?)(</script\s*>)", re.I | re.S)
 
@@ -149,26 +156,54 @@ def sanitize_remote_code(source):
         tag = match.group(0)
         opening = match.group(1).lower()
         markers = ("cloudflareinsights", "__cf$cv$params", "challenge-platform", "/cdn-cgi/")
-        if "src=" in opening or any(marker in tag.lower() for marker in markers):
+        if "src" in parse_start_tag_attributes(opening) or any(marker in tag.lower() for marker in markers):
             removed += 1
             return ""
         return tag
 
     source = SCRIPT_RE.sub(clean, source)
-    source = re.sub(r'<link[^>]*href="https?://[^"]+"[^>]*>', "", source, flags=re.I)
+
+    def clean_link(match):
+        attributes = parse_start_tag_attributes(match.group(0))
+        href = attributes.get("href", "")
+        if is_remote_resource_url(href):
+            return ""
+        return match.group(0)
+
+    source = re.sub(r"<link\b[^>]*>", clean_link, source, flags=re.I | re.S)
     return source, removed
 
 
-def run_patchers(workfile, workdir, args, dictionary_path):
+def _python_string_contents(value):
+    """Escape a value for a double-quoted Python string in a staged patcher."""
+    return (str(value).replace("\\", "\\\\").replace('"', '\\"')
+            .replace("\r", "\\r").replace("\n", "\\n"))
+
+
+def _apply_patcher_substitutions(source, workfile, dictionary_path, args):
     values = {
-        "@WORKFILE@": workfile,
-        "@DICT@": dictionary_path,
+        "@WORKFILE@": _python_string_contents(workfile),
+        "@DICT@": _python_string_contents(dictionary_path),
         "@PREFIX@": args.prefix,
         "@SLUG@": args.slug,
         "@PICKER@": args.picker,
-        "@TITLE@": args.title,
-        "@AUTHOR@": args.author,
     }
+    replacements = {old: values[token] for old, token in SUBSTITUTIONS}
+    pattern = re.compile("|".join(re.escape(old) for old in sorted(replacements, key=len, reverse=True)))
+    return pattern.sub(lambda match: replacements[match.group(0)], source)
+
+
+def _configure_panel_identity(source, title, author):
+    """Set safe Python string literals consumed by add_panel.py's JSON encoder."""
+    for name, value in (("BOOK_TITLE", title), ("BOOK_AUTHOR", author)):
+        pattern = re.compile(r"^%s\s*=.*$" % re.escape(name), re.M)
+        source, count = pattern.subn(lambda _match: "%s = %r" % (name, value), source, count=1)
+        if count != 1:
+            raise ValueError("add_panel.py is missing the %s identity constant" % name)
+    return source
+
+
+def run_patchers(workfile, workdir, args, dictionary_path):
     print("2. patchers, in order (pristine HTML input)")
     for name in PATCHERS:
         if name == "add_dictionary.py" and args.no_dictionary:
@@ -177,8 +212,9 @@ def run_patchers(workfile, workdir, args, dictionary_path):
         path = os.path.join(TOOLKIT_DIR, name)
         with io.open(path, encoding="utf-8") as source:
             text = source.read()
-        for old, new in SUBSTITUTIONS:
-            text = text.replace(old, values.get(new, new))
+        text = _apply_patcher_substitutions(text, workfile, dictionary_path, args)
+        if name == "add_panel.py":
+            text = _configure_panel_identity(text, args.title, args.author)
         staged = os.path.join(workdir, name)
         with io.open(staged, "w", encoding="utf-8") as output:
             output.write(text)
@@ -222,10 +258,13 @@ def check_output(workfile, args, is_pdf, no_dictionary):
     check("one toolbar set", all(book.count('id="%s"' % item) == 1 for item in ("theme-toggle", "notes-toggle")))
     check("no pre-baked annotations", book.count('<script type="application/json" id="baked-annotations">') == 0)
 
-    references = re.findall(r'<script[^>]*src=', book, re.I)
-    references += re.findall(r'<link[^>]*href="https?://', book, re.I)
-    references += re.findall(r'<img[^>]*src="https?://', book, re.I)
-    check("self-contained: no external resources", not references)
+    references = external_resource_references(book)
+    check("self-contained: no external or sidecar resources", not references)
+    if references:
+        for reference in references[:5]:
+            print("        resource: " + reference[:240])
+        if len(references) > 5:
+            print("        and %d more" % (len(references) - 5))
     check("no Cloudflare tracking/challenge", all(value not in book.lower() for value in ("cloudflareinsights", "__cf$cv$params", "challenge-platform", "/cdn-cgi/")))
 
     if no_dictionary:

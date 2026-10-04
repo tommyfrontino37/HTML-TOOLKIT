@@ -44,6 +44,14 @@ except ImportError:
     sys.exit(2)
 
 TOOLKIT_DIR = os.path.dirname(os.path.abspath(__file__))
+if TOOLKIT_DIR not in sys.path:
+    sys.path.insert(0, TOOLKIT_DIR)
+from resource_checks import (  # noqa: E402
+    external_resource_references,
+    is_remote_resource_url,
+    parse_start_tag_attributes,
+)
+
 SHELL = os.path.join(TOOLKIT_DIR, "shell.html")
 DICT_BUILDER = os.path.join(TOOLKIT_DIR, "make_dict_data.py")
 SCRIPT_RE = re.compile(r"(<script\b[^>]*>)(.*?)(</script\s*>)", re.I | re.S)
@@ -404,14 +412,23 @@ def sanitize_template(source):
         full_tag = match.group(0)
         opening = match.group(1).lower()
         markers = ("cloudflareinsights", "__cf$cv$params", "challenge-platform", "/cdn-cgi/")
-        if "src=" in opening or any(marker in full_tag.lower() for marker in markers):
+        if "src" in parse_start_tag_attributes(opening) or any(marker in full_tag.lower() for marker in markers):
             removed += 1
             return ""
         return full_tag
 
     source = SCRIPT_RE.sub(clean_script, source)
-    # The reader is offline-first; remove remote stylesheets/preconnect hints.
-    source = re.sub(r'<link[^>]*href="https?://[^"]+"[^>]*>', "", source, flags=re.I)
+
+    def clean_link(match):
+        attributes = parse_start_tag_attributes(match.group(0))
+        href = attributes.get("href", "")
+        if is_remote_resource_url(href):
+            return ""
+        return match.group(0)
+
+    # The reader is offline-first; remove remote stylesheets/preconnect hints,
+    # regardless of quote style or whitespace around the attribute equals sign.
+    source = re.sub(r"<link\b[^>]*>", clean_link, source, flags=re.I | re.S)
     return source, removed
 
 
@@ -436,15 +453,6 @@ def set_dictionary_data(source, data):
     if count != 1:
         raise ValueError("reader shell must contain exactly one dict-data placeholder")
     return updated
-
-
-def external_resource_references(source):
-    """List resource-bearing external refs (ordinary outbound links are fine)."""
-    refs = re.findall(r'<script[^>]*src=', source, flags=re.I)
-    refs += re.findall(r'<link[^>]*href="https?://', source, flags=re.I)
-    refs += re.findall(r'<img[^>]*src="https?://', source, flags=re.I)
-    refs += re.findall(r'url\s*\(\s*["\']?https?://', source, flags=re.I)
-    return refs
 
 
 def build_book_shell(shell, args, total, toc, body_size, reverse_digits):
@@ -632,7 +640,9 @@ def main():
             reverse_digits = detect_reversed_arabic_digits(doc)
 
         sizes = Counter()
-        for index in range(min(total, 40)):
+        # Sample the entire document, not only the opening 40 pages. Some PDFs
+        # have scanned covers/front matter followed by searchable body text.
+        for index in range(total):
             for block in doc[index].get_text("dict").get("blocks", []):
                 for line in block.get("lines", []):
                     for span in line.get("spans", []):
@@ -718,7 +728,7 @@ def main():
 
         refs = external_resource_references(output_html)
         if refs:
-            raise ValueError("reader template still has external resource references; refusing to write an online-dependent book")
+            raise ValueError("reader template still has external or sidecar resource references; refusing to write a non-self-contained book")
         os.makedirs(os.path.dirname(out_path) or ".", exist_ok=True)
         fd, temp_output = tempfile.mkstemp(prefix=".book-", suffix=".html", dir=os.path.dirname(out_path) or ".")
         try:
