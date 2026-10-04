@@ -1,5 +1,70 @@
 # Changelog
 
+## Unreleased — endnote markers survive conversion, and endnotes become navigable
+
+Found converting *Precious Remedies Against Satan's Devices* (Thomas Brooks,
+274 pages, 2026-10-04): two of the book's 412 endnote markers came out of the
+PDF as ordinary body text, two others arrived as one marker that cannot be split
+without knowing the note table, and the tool that bakes an export printed
+`PROBLEM` on every correct bake.
+
+### Fixed
+
+- **`pdf_to_book.py` demoted endnote markers that open a line.** `line_runs()`
+  decided superscript from the PDF's own flag alone; this book's producer sets
+  two markers (78, 339) in the superscript size with the flag clear, so the
+  reading layer said "78 Joseph was famous …". The rule now also promotes a
+  short digit run — at most three digits, set under 0.85× the body size, and the
+  smallest size on its own line. It cannot reach a printed endnote number, which
+  is set at body size.
+- **`bake_annotations.py` printed `PROBLEM` on every correct bake.** Its summary
+  counted the bare `id="baked-annotations"`, which the reader's own JavaScript
+  also mentions. It counts the whole tag now — the exact trap the notes file
+  warns about, sitting one function away from the check that warns about it.
+
+### Added
+
+- **`link_endnotes.py`** — a post-processor that makes the book's printed
+  endnote numbers clickable in both directions. The back-arrow is drawn in CSS
+  so not one character of text is added: highlights live as character offsets,
+  and a stray character would move every one of them. It also splits a marker
+  the PDF packs two notes into (`324325` → `324` + `325`) and repairs markers an
+  older converter left naked. Documented in `LINKING-ENDNOTES.md`.
+- **`bake_annotations.py --master`** — bake into a named book instead of the one
+  whose filename is compiled into the script.
+
+### Changed
+
+- **`bake_annotations.py` derives its names from the book.** The payload's `app`
+  label and the default output filename now come from the master's `<title>`
+  (HTML entities decoded), so a baked copy no longer calls itself *The Doctrine
+  of Repentance*.
+- README quick start leads with the self-repairing build (`--no-auto-setup`
+  keeps the hint-only path) and lists the post-build tools; `README.txt` and
+  `HOW-TO-REQUEST-ANOTHER-BOOK.md` §5 no longer read as if the patchers'
+  hardcoded paths had to be edited by hand before a build.
+- `LICENSE` (MIT), `NOTICE.md` (third-party components, licence and content
+  caveats) and `.gitignore` added.
+
+### Verified
+
+- Rebuilt the Brooks book end to end with the fixed converter:
+  `RESULT: 41 passed, 0 failed`. The size rule re-scanned across all 274 pages —
+  the only small digit runs in the book are the 412 markers — so 78 and 339 are
+  wrapped, nothing else moved, no marker above 412, no folio or TOC digit
+  caught.
+- `link_endnotes.py` on the rebuilt book: 412/412 markers, 412/412 back-links,
+  0 dangling, every section's text byte-identical; with the converter fixed the
+  naked-marker repair now reports nothing to do.
+- The linked book passes the 41-test suite again, plus a browser pass on the two
+  rescued markers: click 78 → note 78 on screen; back-arrow → the sentence on
+  screen, clear of the sticky toolbar; marks survive a reload; dark theme the
+  same; 0 page errors, in `file://` and inside a sandboxed iframe.
+- `bake_annotations.py` against the rebuilt book: 2 highlights + 1 note, one
+  data block, `data block    : 1`, default filename taken from the book; the
+  baked copy opens in Reading view with its marks restored, 0 page errors.
+- `python3 -m unittest discover -s tests`: 17 passed.
+
 ## Unreleased — the build repairs its own test environment
 
 Found the hard way in a fresh session (2026-10-03): the merged fail-fast

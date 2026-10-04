@@ -81,6 +81,27 @@ The direct PDF converter is also available:
 It builds a complete annotated HTML file by itself; do not run build_enhanced.py on
 that output again.
 
+AFTER THE BUILD (POST-PROCESSING)
+---------------------------------
+Two tools work on a finished book, because the patchers must never be re-run
+over one:
+
+    python3 link_endnotes.py --input "My Book.html" \
+        --output "My Book (linked endnotes).html"
+
+    python3 bake_annotations.py my-export.json --master "My Book.html"
+
+link_endnotes.py makes the book's own printed endnote numbers clickable in both
+directions. bake_annotations.py writes a highlights/notes export into a copy
+(without --master it still looks for the original toolkit book next to itself).
+See LINKING-ENDNOTES.md for the first one.
+
+A note on markers: a PDF may set an endnote marker that opens a line in a
+smaller size without setting the superscript flag. pdf_to_book.py now detects
+that by size (digits only, at most three, the smallest size on its line), so
+such markers become <sup> like the rest instead of dropping into the body text
+as ordinary numbers.
+
 THE OFFLINE DICTIONARY
 ----------------------
 By default, the PDF builder creates definitions only for words found in the book.
@@ -108,6 +129,8 @@ FILES
   add_notes.py          per-quote note patcher
   add_panel.py          annotations panel patcher
   add_dictionary.py     offline dictionary patcher for pristine HTML
+  link_endnotes.py      post-processor: links printed endnotes, both ways
+  bake_annotations.py   bakes a highlights/notes export into a copy of a book
   run_tests.py          browser behavior tests
   test_isolation.py     checks that separate books cannot share annotations
   tests/                browser-free regression tests for PDF fixes

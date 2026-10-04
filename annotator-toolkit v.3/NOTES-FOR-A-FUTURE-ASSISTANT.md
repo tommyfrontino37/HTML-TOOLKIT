@@ -44,6 +44,9 @@ read its markup first and adapt the anchors — do not guess.
    (`#hl-status`, `#ow-msg`, panel hidden, list empty, `body[data-mode]="reading"`,
    `#view-mode` value). Re-bake must always yield exactly **one** data block.
    Check with: `text.count('<script type="application/json" id="baked-annotations">') == 1`.
+   This bit twice: `bake_annotations.py`'s own summary printed `PROBLEM` on
+   every *correct* bake of a v.3 book, because it counted the bare id, which the
+   reader's JavaScript also mentions. It counts the whole tag now (2026-10-04).
 3. **The panel's status line is invisible.** `#hl-status` lives in the toolbar and the
    panel overlay covers it. Any panel action that reports an outcome must ALSO write
    into the panel's own message line (`#ow-msg`). This was the cause of a "dead button".
@@ -86,6 +89,35 @@ read its markup first and adapt the anchors — do not guess.
 - **Landmine:** after patching, `add_*` scripts are NOT idempotent - running the
   pipeline on an already-built file fails on the first duplicate anchor.  Always
   rebuild from `uploads/`.
+
+## Where the patchers get their paths (asked often, looks wrong, is not)
+
+The five patchers open a fixed path with the Watson title and storage keys, which
+reads like a landmine and is instead the design: `build_enhanced.py` stages an
+edited copy of each patcher into the work directory, substituting
+`/home/user/…`, the title, author, prefix, slug and picker (`SUBSTITUTIONS`), and
+runs the copy. The originals on disk are never executed. If you change a
+patcher's opening line, keep the literal strings the substitution table matches,
+or the staged copy will keep the old book's path. Parameterising the patchers
+properly (argparse, no substitution) has been considered twice and not done: it
+touches every literal in ~100 KB of code, and there is no pristine-HTML fixture
+in the tree to regression-test the HTML route against — the v.1 example is
+already annotated, so the patchers fail on it at the second anchor.
+
+## The PDF converter's superscript rule, and why it is narrow
+
+`line_runs()` trusts the PDF's superscript flag, and additionally promotes a
+short digit run (≤ 3 digits) set clearly under the body size (< 0.85×) that is
+also the smallest size on its line. Some producers mark an endnote marker that
+*opens* a line by size alone with the flag clear; on *Precious Remedies Against
+Satan's Devices* (Brooks, 274 pages, Banner of Truth/calibre, 2026-10-04) that
+silently demoted markers 78 and 339 to body text and cost a chase. Before
+widening the rule, re-run the scan rather than reasoning about it: across the
+whole Brooks PDF the only small digit runs are the 412 endnote markers, and the
+printed endnote numbers are set at body size, so the rule cannot reach them.
+A merged run that the PDF itself packs into one span (`324325`) is *not*
+splittable here — the converter has no note table — and is left to
+`link_endnotes.py`, which splits it against the real note numbers.
 
 ## Test before handing over
 

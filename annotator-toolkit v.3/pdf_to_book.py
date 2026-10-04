@@ -82,16 +82,36 @@ def detect_reversed_arabic_digits(doc):
     return bool(digit_runs) and latin_letters >= 200 and arabic_letters == 0
 
 
-def line_runs(line, reverse_arabic_digits=False):
-    """One PDF line -> (plain text, size, [(text, superscript, italic)])."""
+def line_runs(line, body_size=0.0, reverse_arabic_digits=False):
+    """One PDF line -> (plain text, size, [(text, superscript, italic)]).
+
+    A run counts as a superscript when the PDF sets the superscript flag, or
+    when it is a short digit run set clearly smaller than the body text: some
+    producers mark an endnote marker that opens a line by size alone, with the
+    flag clear. Those markers were being left as body text, so the reading
+    layer lost the distinction between "and then 78 Joseph was famous" and a
+    numbered note reference.
+
+    The size rule is deliberately narrow: digits only, at most three of them,
+    and strictly the smallest size on its own line. Page furniture (a lone
+    folio) is already dropped by looks_like_furniture().
+    """
     runs, plain, size = [], [], 0.0
-    for span in line.get("spans", []):
+    spans = line.get("spans", [])
+    largest = max([float(s.get("size", 0.0)) for s in spans] or [0.0])
+    for span in spans:
         text = clean_text(span.get("text", ""), reverse_arabic_digits)
         if not text:
             continue
         flags = int(span.get("flags", 0))
         font = str(span.get("font", "")).lower()
+        span_size = float(span.get("size", 0.0))
         superscript = bool(flags & 1)
+        if (not superscript and body_size and 0 < span_size < body_size * 0.85
+                and span_size < largest):
+            marker = text.strip()
+            if marker.isdigit() and 1 <= len(marker) <= 3:
+                superscript = True
         italic = bool(flags & 2) or "italic" in font or "oblique" in font
         runs.append((text, superscript, italic))
         plain.append(text)
@@ -110,7 +130,7 @@ def page_lines(page, body_size, reverse_arabic_digits=False):
             continue
         block_items = []
         for line in block.get("lines", []):
-            text, size, runs = line_runs(line, reverse_arabic_digits)
+            text, size, runs = line_runs(line, body_size, reverse_arabic_digits)
             if text.strip():
                 block_items.append((text, size, runs))
         if not block_items:

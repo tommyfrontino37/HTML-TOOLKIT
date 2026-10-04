@@ -110,14 +110,26 @@ you pass `--no-dictionary`.  It adds roughly 120 KB per 1,000 unique words.
 uploads/<your file>                      the pristine original — never edited
 add_dark_mode.py  →  add_highlights.py  →  add_notes.py  →  add_panel.py
                                          each rewrites the working copy in place
-bake_annotations.py your-export.json out.html      the same bake from the command line
+link_endnotes.py "My Book.html"          printed endnote numbers become links
+bake_annotations.py my-export.json --master "My Book.html"
+                                         the same bake from the command line
 ```
 
 Build order matters and the patchers are **not** idempotent: always start again from
-`uploads/`, never re-run one over an already-built file.
+`uploads/`, never re-run one over an already-built file. `link_endnotes.py` and
+`bake_annotations.py` are safe on a finished book — they read it and write a
+new file.
+
+**The patchers look hardcoded, and for the build they are not.** Each one opens a
+book at a fixed path with the Watson title and keys. `build_enhanced.py` never runs
+them as-is: it stages a copy of each, substitutes the paths, title, author, prefix,
+slug and picker (see `SUBSTITUTIONS` in `build_enhanced.py`), and runs the copy.
+So both documented routes work for any book. The table below matters only if you
+run a patcher *by hand* — in that case edit these first, or you will patch the
+Watson file.
 
 Storage keys and guards to re-key for a new book (find and replace across the four
-patchers before building):
+patchers before building by hand):
 
 | What | Current value |
 |---|---|
